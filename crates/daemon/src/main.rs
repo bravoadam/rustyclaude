@@ -48,6 +48,8 @@ static BYPASS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)yes, i accept
 /// Folder trust question ("No, exit" is the default!). The user chose this folder for
 /// the session, so it's trusted.
 static TRUST: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)yes, i trust this folder").unwrap());
+/// Confirmation menu shown by /remote-control (option 1 is the default).
+static RC_ENABLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)enable remote control").unwrap());
 /// The selected line of an Ink select menu.
 static CURSOR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*❯").unwrap());
 /// Footer under an Ink select menu.
@@ -197,6 +199,8 @@ struct Live {
     last_settle_enter: Option<Instant>,
     /// Started without --remote-control (no login yet); enable it once logged in.
     rc_pending: bool,
+    /// When the daemon last typed /remote-control (its confirmation menu gets answered).
+    rc_requested: Option<Instant>,
     /// Last time a "Yes" menu (skip-permissions warning, folder trust) was answered.
     last_menu_answer: Option<Instant>,
 }
@@ -517,6 +521,16 @@ fn supervise(st: &State) {
             l.last_menu_answer = Some(Instant::now());
             let _ = choose(&r.name, &screen, option);
         }
+        // Our own /remote-control: confirm "Enable Remote Control" (no footer on this menu).
+        if l.rc_requested.is_some_and(|t| t.elapsed() < Duration::from_secs(30)) {
+            let tail = last_lines(&screen, 8);
+            if RC_ENABLE.is_match(&tail) && tail.lines().any(|ln| CURSOR.is_match(ln)) {
+                l.rc_requested = None;
+                let _ = choose(&r.name, &screen, &RC_ENABLE);
+            }
+        } else {
+            l.rc_requested = None;
+        }
         drive_login(st, &r.name, l, &screen, counts, def);
 
         view.push(SessionInfo {
@@ -567,6 +581,12 @@ fn supervise(st: &State) {
     if changed {
         let _ = st.notify.send(DaemonMsg::Sessions { sessions: view });
     }
+}
+
+/// Types /remote-control and remembers it, so its confirmation menu gets answered.
+fn request_rc(name: &str, l: &mut Live) {
+    l.rc_requested = Some(Instant::now());
+    let _ = tmux::type_line(name, "/remote-control");
 }
 
 /// A select menu containing `option` is what the session is waiting on right now:
@@ -679,7 +699,7 @@ fn drive_login(st: &State, name: &str, l: &mut Live, screen: &str, c: Counts, de
             if l.rc_pending {
                 // Logged in now: turn on Remote Control (it was started without it).
                 l.rc_pending = false;
-                let _ = tmux::type_line(name, "/remote-control");
+                request_rc(name, l);
             }
         }
     }
@@ -790,7 +810,10 @@ fn action(st: &State, name: &str, action: &str) -> Result<()> {
         "autostart_off" => {
             st.update_def(name, |d| d.autostart = false);
         }
-        "remote_control" => tmux::type_line(name, "/remote-control")?,
+        "remote_control" => {
+            let mut live = st.live.lock().unwrap();
+            request_rc(name, live.entry(name.to_string()).or_default());
+        }
         "resume_on" | "resume_off" => {
             st.update_def(name, |d| d.resume = action == "resume_on");
         }
