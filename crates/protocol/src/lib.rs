@@ -6,7 +6,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Largest file the daemon will send back for previewing.
 pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
@@ -51,6 +51,15 @@ pub struct SessionInfo {
     /// Terminal mode: an account switch (/login) is in progress.
     #[serde(default)]
     pub logging_in: bool,
+    /// In the daemon's session list (autostarted, restarted on crash). False for
+    /// tmux sessions the daemon only found running.
+    #[serde(default)]
+    pub managed: bool,
+    #[serde(default)]
+    pub autostart: bool,
+    /// Claude is asking to log in (or has no credentials yet).
+    #[serde(default)]
+    pub needs_login: bool,
 }
 
 /// Client -> daemon.
@@ -81,6 +90,9 @@ pub enum ClientMsg {
     LoginCode { session: String, code: String },
     /// Terminal mode: abandon an in-progress switch (sends Escape).
     LoginCancel { session: String },
+    /// tmux sessions: "start" | "stop" | "restart" | "manage" | "unmanage" |
+    /// "autostart_on" | "autostart_off" | "remote_control".
+    SessionAction { session: String, action: String },
     /// Terminal mode: type a line into the session (e.g. "/remote-control").
     Command { session: String, line: String },
     /// Fetch a file from the host for previewing. Relative paths resolve against the session cwd.

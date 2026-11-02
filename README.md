@@ -25,41 +25,31 @@ cd app && npm install && npx tauri dev     # or: npx tauri build
 
 Accounts are stored in `~/Library/Application Support/rustyclaude/accounts.toml`.
 
-## Moving sessions between accounts
+## Host sessions (the daemon)
 
-Sessions started from **Host Sessions** run on your machines as
-`claude --remote-control <name>` under a daemon, so they also appear in the account's claude.ai tab.
-When a session hits its usage limit it's flagged. Right-click it → **Move to ▸ account**:
+Run `deploy/install-daemon.sh` on each Linux machine (needs tmux, Claude Code and Rust).
+It installs a systemd user service that starts at boot and prints the `[[host]]` block to
+paste into `~/Library/Application Support/rustyclaude/hosts.toml` on the Mac.
 
-1. the daemon types `/login` into the session,
-2. the sign-in page opens in that account's tab (already signed in), you click **Authorize**,
-3. the code is captured from the redirect and typed back into the session (or paste it manually).
+The daemon keeps one tmux session per project folder (`21wild`, `blockari`, …):
 
-The conversation keeps running in the same process, now on the new account.
-Only sessions started from the app can be moved.
-
-### Host setup (each machine)
-
-```sh
-# install Claude Code and log in once, then:
-cargo build --release -p rustyclaude-daemon
-RUSTYCLAUDE_TOKEN=<long random secret> \
-  ./target/release/rustyclaude-daemon --bind <LAN or Tailscale IP>:7878
-```
-
-Then on the Mac, in `~/Library/Application Support/rustyclaude/hosts.toml`:
-
-```toml
-[[host]]
-name = "linux-box"
-url = "ws://192.168.1.20:7878"
-token = "<same secret>"
-```
-
-Traffic is plain `ws://`: fine on a trusted LAN, use Tailscale for anything else.
+- **Defined once, started automatically.** Add a folder from **Host Sessions → New session**.
+  It's saved in `~/.config/rustyclaude/daemon.toml` on that machine, started at boot,
+  restarted if it exits, and runs with `--remote-control <name>`. No `/rc` needed.
+- **Still plain tmux.** `tmux attach -t 21wild` works as before (right-click → copy command).
+  tmux sessions you started by hand are listed too; right-click → **Manage** to adopt them.
+- **One login per session.** Each session has its own Claude config dir
+  (`~/.claude-sessions/<name>`), so its login survives restarts and never affects other
+  sessions. Shared settings (`settings.json`, `CLAUDE.md`, agents, commands, skills, plugins,
+  hooks) are symlinked from `~/.claude`. User-level MCP servers (`~/.claude.json`) are not shared.
+- **Logging in / moving accounts.** Right-click → **Log in as ▸** (new sessions) or
+  **Move to ▸** (e.g. after "limit reached"). The daemon drives `/login`, the sign-in page
+  opens in that account's tab (already signed in), you click **Authorize**, and the code is
+  captured and typed back automatically (or paste it in the panel).
 
 ## Status
 
-The `/login` automation was tested against a stand-in for Claude Code, not a real login yet.
-It matches Claude Code's login screen text ("login method", "Paste code", "Login successful"),
+The daemon is tested end to end with real tmux and a stand-in for Claude Code (login, move,
+limit detection, stop/start, adopt), not yet against a real Claude login. It matches Claude
+Code's screen text ("login method", "Paste code", "Login successful", trust/theme prompts),
 so wording changes in Claude Code may need small adjustments in `crates/daemon/src/main.rs`.

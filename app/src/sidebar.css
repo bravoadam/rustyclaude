@@ -121,3 +121,6 @@ form.new button[type=submit] { background: var(--accent); border-color: var(--ac
 
 .flash { position: fixed; right: 16px; bottom: 16px; z-index: 200; max-width: 420px; padding: 9px 12px; border-radius: 8px; background: #4a2420; color: #ffd9d3; font-size: 12px; }
 [hidden] { display: none !important; }
+.pill.warn { color: #1f1e1d; background: #e0b04f; border-color: #e0b04f; }
+.sess.nologin .dot { background: #e0b04f; }
+.flash.ok { background: #24402a; color: #d6f5dc; }

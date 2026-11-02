@@ -20,9 +20,9 @@ const hostSend = (host, msg) => call('host_send', { host, msg });
 const notify = (title, body) => call('notify_native', { title, body });
 const accountByName = (name) => state.accounts.find((a) => a.name.toLowerCase() === String(name).toLowerCase());
 
-function flash(msg) {
+function flash(msg, ok = false) {
   const el = document.createElement('div');
-  el.className = 'flash';
+  el.className = ok ? 'flash ok' : 'flash';
   el.textContent = msg;
   document.body.append(el);
   setTimeout(() => el.remove(), 6000);
@@ -83,7 +83,7 @@ function renderSessionsPanel() {
     <div class="switch" data-key="${esc(key(w.host, w.session))}">
       <div class="switch-text">
         <b>${esc(w.sessionName)}</b> → <b>${esc(w.accountName)}</b>:
-        ${w.status === 'starting' ? 'running /login on the host…'
+        ${w.status === 'starting' ? 'starting login on the host…'
           : w.status === 'approve' ? `approve in the <b>${esc(w.accountName)}</b> tab (click Authorize). The code is sent back automatically.`
           : w.status === 'sent' ? 'code sent, finishing sign-in…'
           : esc(w.status)}
@@ -96,20 +96,27 @@ function renderSessionsPanel() {
     const h = hosts[name];
     const sessions = h.sessions.filter((s) => s.mode === 'terminal' || !s.mode).map((s) => {
       const acct = accountByName(s.account);
-      return `<li class="sess ${s.running ? '' : 'dead'} ${s.limited ? 'limited' : ''}" data-host="${esc(name)}" data-session="${esc(s.id)}" title="${esc(s.cwd)}">
+      const pills = [
+        s.logging_in ? '<span class="pill busy">logging in…</span>'
+          : s.needs_login && s.running ? '<span class="pill warn">not logged in</span>'
+          : s.limited ? '<span class="pill bad">limit reached</span>' : '',
+        !s.managed ? '<span class="pill" title="Started by hand. Right-click → Manage to autostart it.">unmanaged</span>' : '',
+        s.managed && !s.autostart ? '<span class="pill" title="Won\'t start automatically">manual</span>' : '',
+      ].join('');
+      return `<li class="sess ${s.running ? '' : 'dead'} ${s.limited ? 'limited' : ''} ${s.needs_login && s.running ? 'nologin' : ''}" data-host="${esc(name)}" data-session="${esc(s.id)}" title="${esc(s.cwd)}">
         <span class="dot"></span>
         <span class="s-main">
           <span class="s-name">${esc(s.name)}</span>
-          <span class="s-meta">${esc(s.cwd)} · ${ago(s.started_at)}</span>
+          <span class="s-meta">${esc(s.cwd)} · ${s.running ? (s.started_at ? `up since ${ago(s.started_at).replace(' ago', '')}` : 'starting') : 'stopped'}</span>
         </span>
-        ${s.logging_in ? '<span class="pill busy">switching…</span>' : s.limited ? '<span class="pill bad">limit reached</span>' : ''}
-        <span class="pill acct-pill" style="--c:${esc(acct?.color ?? '#888')}">${esc(s.account)}</span>
+        ${pills}
+        ${s.needs_login && !s.logging_in ? '' : `<span class="pill acct-pill" style="--c:${esc(acct?.color ?? '#888')}">${esc(s.account)}</span>`}
         <button class="mini more" data-more>⋯</button>
       </li>`;
     }).join('');
     const form = newFormOpen.has(name) ? `<form class="new" data-host="${esc(name)}">
-        <input name="cwd" placeholder="Directory on ${esc(h.hostname ?? name)}, e.g. ~/project" autocomplete="off" />
-        <input name="name" placeholder="Session name (shown in claude.ai)" autocomplete="off" />
+        <input name="cwd" placeholder="Folder on ${esc(h.hostname ?? name)}, e.g. ~/21wild" autocomplete="off" />
+        <input name="name" placeholder="Name (defaults to folder name)" autocomplete="off" />
         <button type="submit">Start</button><button type="button" data-cancel-new="${esc(name)}">Cancel</button>
       </form>` : '';
     return `<section class="host">
@@ -121,7 +128,7 @@ function renderSessionsPanel() {
       </div>
       ${h.status !== 'connected' && h.error ? `<div class="host-err">${esc(h.error)}</div>` : ''}
       ${form}
-      <ul>${sessions || (h.status === 'connected' ? '<li class="none">No sessions started from RustyClaude on this host yet.</li>' : '')}</ul>
+      <ul>${sessions || (h.status === 'connected' ? '<li class="none">No sessions yet. Add a game folder with “New session”.</li>' : '')}</ul>
     </section>`;
   }).join('') : '<p class="empty-block">No hosts configured yet. Add your machines to the hosts file below, then restart the app.</p>';
 }
@@ -131,26 +138,33 @@ function renderSessionsPanel() {
 function openMenu(x, y, host, sessionId) {
   const s = hosts[host]?.sessions.find((z) => z.id === sessionId);
   if (!s) return;
-  const targets = state.accounts.filter((a) => a.name.toLowerCase() !== String(s.account).toLowerCase());
-  const canMove = s.running && !s.logging_in && targets.length;
+  const loggedOut = s.needs_login;
+  const targets = state.accounts.filter((a) => loggedOut || a.name.toLowerCase() !== String(s.account).toLowerCase());
+  const canLogin = s.running && !s.logging_in && targets.length;
   const cur = accountByName(s.account);
+  const item = (act, label, enabled = true, cls = '') => `<button data-act="${act}" class="${cls}" ${enabled ? '' : 'disabled'}>${label}</button>`;
   const menu = $('#ctx');
   menu.innerHTML = `
     <div class="ctx-title">${esc(s.name)}</div>
-    <div class="ctx-label">Move to account</div>
-    ${targets.length ? targets.map((a) => `<button data-act="move" data-acct="${esc(a.id)}" ${canMove ? '' : 'disabled'}>
+    <div class="ctx-label">${loggedOut ? 'Log in as' : 'Move to account'}</div>
+    ${targets.length ? targets.map((a) => `<button data-act="login" data-acct="${esc(a.id)}" ${canLogin ? '' : 'disabled'}>
         <span class="avatar xs" style="--c:${esc(a.color)}">${esc(initials(a.name))}</span>${esc(a.name)}</button>`).join('')
-      : '<div class="ctx-note">Add another account first</div>'}
+      : '<div class="ctx-note">Add an account in the sidebar first</div>'}
     <hr>
-    ${cur ? `<button data-act="open">Open ${esc(cur.name)} tab</button>` : ''}
-    <button data-act="rc" ${s.running ? '' : 'disabled'}>Re-enable Remote Control</button>
-    <button data-act="kill" class="danger">${s.running ? 'Stop session' : 'Remove from list'}</button>`;
+    ${cur ? item('open', `Open ${esc(cur.name)} tab`) : ''}
+    ${item('copy', 'Copy “tmux attach” command')}
+    ${s.running ? item('rc', 'Re-enable Remote Control') : ''}
+    <hr>
+    ${s.managed ? (s.running ? item('restart', 'Restart') + item('stop', 'Stop') : item('start', 'Start'))
+      : item('manage', 'Manage (autostart + restart)')}
+    ${s.managed ? item(s.autostart ? 'autostart_off' : 'autostart_on', s.autostart ? 'Don’t start automatically' : 'Start automatically') : ''}
+    ${s.managed ? item('unmanage', 'Remove from list', true, 'danger') : ''}`;
   menu.dataset.host = host;
   menu.dataset.session = sessionId;
   menu.hidden = false;
   const r = menu.getBoundingClientRect();
   menu.style.left = `${Math.min(x, innerWidth - r.width - 8)}px`;
-  menu.style.top = `${Math.min(y, innerHeight - r.height - 8)}px`;
+  menu.style.top = `${Math.max(8, Math.min(y, innerHeight - r.height - 8))}px`;
 }
 const closeMenu = () => { $('#ctx').hidden = true; };
 
@@ -162,10 +176,15 @@ $('#ctx').addEventListener('click', (e) => {
   closeMenu();
   if (!s) return;
   switch (b.dataset.act) {
-    case 'move': startSwitch(host, s, state.accounts.find((a) => a.id === b.dataset.acct)); break;
+    case 'login': startSwitch(host, s, state.accounts.find((a) => a.id === b.dataset.acct)); break;
     case 'open': { const a = accountByName(s.account); if (a) call('select_account', { id: a.id }); break; }
-    case 'rc': hostSend(host, { type: 'command', session, line: '/remote-control' }); break;
-    case 'kill': hostSend(host, { type: 'kill', session }); break;
+    case 'copy': navigator.clipboard.writeText(`tmux attach -t ${s.name}`).then(() => flash(`Copied: tmux attach -t ${s.name}`, true)); break;
+    case 'rc': hostSend(host, { type: 'session_action', session, action: 'remote_control' }); break;
+    case 'unmanage':
+      hostSend(host, { type: 'session_action', session, action: 'unmanage' });
+      flash(`${s.name} removed from the list${s.running ? ' (its tmux session keeps running)' : ''}`, true);
+      break;
+    default: hostSend(host, { type: 'session_action', session, action: b.dataset.act });
   }
 });
 document.addEventListener('mousedown', (e) => { if (!e.target.closest('#ctx')) closeMenu(); });
@@ -189,8 +208,8 @@ function endSwitch(host, session, ok, message) {
   if (!w) return;
   switches.delete(key(host, session));
   call('cancel_oauth', { session });
-  if (ok) notify(`Moved "${w.sessionName}" to ${w.accountName}`, 'The session continues on the new account.');
-  else notify(`Couldn't move "${w.sessionName}"`, message || 'The account switch failed.');
+  if (ok) notify(`"${w.sessionName}" is now on ${w.accountName}`, 'Logged in. The session continues on this account.');
+  else notify(`Couldn't log "${w.sessionName}" in to ${w.accountName}`, message || 'The login failed.');
   render();
 }
 
