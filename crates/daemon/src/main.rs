@@ -193,6 +193,7 @@ struct Live {
     last_start: Option<Instant>,
     /// After a login: keep accepting first-run prompts until then.
     settle_until: Option<Instant>,
+    settle_started: Option<Instant>,
     last_settle_enter: Option<Instant>,
     /// Started without --remote-control (no login yet); enable it once logged in.
     rc_pending: bool,
@@ -633,9 +634,16 @@ fn drive_login(st: &State, name: &str, l: &mut Live, screen: &str, c: Counts, de
             l.limit_base = c.limit; // old "limit reached" text no longer counts
             l.limited = false;
             l.settle_until = Some(now + Duration::from_secs(20));
+            l.settle_started = Some(now);
+            // /login disconnects Remote Control ("Login successful. Remote Control
+            // disconnected."), so always turn it back on, now under the new account.
+            l.rc_pending = true;
             l.settle_base = c.prompts;
             l.settle_enters = 0;
-            let _ = tmux::enter(name); // "Press Enter to continue"
+            // Older Claude Code versions wait on "Press Enter to continue" here.
+            if last_lines(screen, 6).to_lowercase().contains("press enter to continue") {
+                let _ = tmux::enter(name);
+            }
             let _ = tmux::restore_size(name);
             if def.is_some() {
                 st.update_def(name, |d| d.account = Some(account));
@@ -662,7 +670,11 @@ fn drive_login(st: &State, name: &str, l: &mut Live, screen: &str, c: Counts, de
             l.settle_enters += 1;
             l.last_settle_enter = Some(now);
             let _ = tmux::enter(name);
-        } else if now > until || (l.rc_pending && l.last_settle_enter.is_none_or(|t| t.elapsed() > Duration::from_secs(4))) {
+        } else if now > until
+            || (l.rc_pending
+                && l.settle_started.is_some_and(|t| t.elapsed() > Duration::from_secs(3))
+                && l.last_settle_enter.is_none_or(|t| t.elapsed() > Duration::from_secs(4)))
+        {
             l.settle_until = None;
             if l.rc_pending {
                 // Logged in now: turn on Remote Control (it was started without it).
