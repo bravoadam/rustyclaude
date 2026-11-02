@@ -54,6 +54,21 @@ pub fn list_sessions() -> Result<Vec<Running>> {
         .collect())
 }
 
+/// (session name, pane process id) for every pane on the server.
+pub fn list_panes() -> Result<Vec<(String, u32)>> {
+    let out = match run(&["list-panes", "-a", "-F", "#{session_name}\t#{pane_pid}"]) {
+        Ok(o) => o,
+        Err(_) => return Ok(vec![]),
+    };
+    Ok(out
+        .lines()
+        .filter_map(|l| {
+            let (name, pid) = l.split_once('\t')?;
+            Some((name.to_string(), pid.trim().parse().ok()?))
+        })
+        .collect())
+}
+
 pub fn exists(name: &str) -> bool {
     run(&["has-session", "-t", &format!("={name}")]).is_ok()
 }

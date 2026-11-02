@@ -410,9 +410,62 @@ fn start_session(st: &State, def: &SessionDef) -> Result<()> {
     Ok(())
 }
 
+/// tmux sessions with a Claude Code process anywhere under one of their panes.
+fn sessions_running_claude() -> HashSet<String> {
+    let panes = tmux::list_panes().unwrap_or_default();
+    if panes.is_empty() {
+        return HashSet::new();
+    }
+    // One `ps` for the whole machine (works on Linux and macOS).
+    let Ok(out) = std::process::Command::new("ps").args(["-A", "-o", "pid=,ppid=,args="]).output() else {
+        return HashSet::new();
+    };
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut is_claude: HashSet<u32> = HashSet::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut it = line.split_whitespace();
+        let (Some(pid), Some(ppid)) = (it.next().and_then(|p| p.parse().ok()), it.next().and_then(|p| p.parse().ok()))
+        else {
+            continue;
+        };
+        children.entry(ppid).or_default().push(pid);
+        // The executable or its script argument is named claude (covers versioned
+        // installs like ~/.local/share/claude/versions/x.y.z and node wrappers).
+        if it.take(2).any(|arg| arg.contains("claude")) {
+            is_claude.insert(pid);
+        }
+    }
+    panes
+        .into_iter()
+        .filter(|(_, root)| {
+            let mut stack = vec![*root];
+            let mut seen = 0;
+            while let Some(p) = stack.pop() {
+                if is_claude.contains(&p) {
+                    return true;
+                }
+                seen += 1;
+                if seen > 500 {
+                    break;
+                }
+                stack.extend(children.get(&p).into_iter().flatten().copied());
+            }
+            false
+        })
+        .map(|(name, _)| name)
+        .collect()
+}
+
 /// One supervision pass: (re)start sessions, read screens, drive logins, push changes.
 fn supervise(st: &State) {
-    let running = tmux::list_sessions().unwrap_or_default();
+    let defs_now = st.cfg.lock().unwrap().sessions.clone();
+    let with_claude = sessions_running_claude();
+    // Unmanaged tmux sessions only matter if they're running Claude Code.
+    let running: Vec<tmux::Running> = tmux::list_sessions()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| defs_now.iter().any(|d| d.name == r.name) || with_claude.contains(&r.name))
+        .collect();
     let running_names: HashSet<&str> = running.iter().map(|r| r.name.as_str()).collect();
     let defs = st.cfg.lock().unwrap().sessions.clone();
 
