@@ -43,6 +43,8 @@ static LOGIN_OK: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)login succe
 static PASTE_CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)paste code").unwrap());
 static LOGIN_FAILED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)oauth error|login failed|invalid (authorization )?code").unwrap());
+/// --dangerously-skip-permissions confirmation ("No, exit" is the default!).
+static BYPASS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)yes, i accept").unwrap());
 /// First-run / post-login prompts where Enter takes the sensible default.
 static ENTER_PROMPTS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)press enter to continue|choose the text style|do you trust the files|yes, proceed|security notes").unwrap()
@@ -54,8 +56,14 @@ const TICK: Duration = Duration::from_millis(800);
 /// Scrollback scanned each tick. Prompts are recognised by their count going up, so
 /// text left on screen from earlier logins never triggers anything.
 const HISTORY: u32 = 1500;
-/// Linked from ~/.claude into each session's own config dir.
+/// Linked from ~/.claude into each session's own config dir. Conversation history
+/// (`projects`, …) is shared so sessions resume your existing conversations and keep
+/// them when moved between accounts.
 const SHARED: &[&str] = &[
+    "projects",
+    "todos",
+    "file-history",
+    "history.jsonl",
     "settings.json",
     "CLAUDE.md",
     "agents",
@@ -104,6 +112,14 @@ struct SessionDef {
     /// keep using whatever config they were started with.
     #[serde(default = "yes")]
     isolated: bool,
+    /// Start with --continue when the folder has a previous conversation.
+    #[serde(default = "yes")]
+    resume: bool,
+    #[serde(default)]
+    skip_permissions: bool,
+    /// Any other flags for `claude`.
+    #[serde(default)]
+    extra_args: Vec<String>,
 }
 
 fn yes() -> bool {
@@ -173,6 +189,8 @@ struct Live {
     last_settle_enter: Option<Instant>,
     /// Started without --remote-control (no login yet); enable it once logged in.
     rc_pending: bool,
+    /// Skip-permissions confirmations already answered (by line count in scrollback).
+    bypass_answered: usize,
 }
 
 struct State {
@@ -301,12 +319,52 @@ fn prepare_config_dir(st: &State, dir: &Path) -> Result<()> {
     for item in SHARED {
         let src = shared.join(item);
         let dst = dir.join(item);
-        if src.exists() && std::fs::symlink_metadata(&dst).is_err() {
+        let dst_meta = std::fs::symlink_metadata(&dst).ok();
+        if dst_meta.as_ref().is_some_and(|m| m.file_type().is_symlink()) {
+            continue;
+        }
+        // Claude already created a real directory here (e.g. a conversation started
+        // before history was shared): move its contents into the shared one first.
+        if dst_meta.as_ref().is_some_and(|m| m.is_dir()) {
+            std::fs::create_dir_all(&src)?;
+            merge_dir(&dst, &src)?;
+            std::fs::remove_dir_all(&dst)?;
+        } else if dst_meta.is_some() {
+            continue; // a real file: leave it alone
+        }
+        let is_dir_item = !item.contains('.');
+        if !src.exists() && is_dir_item {
+            std::fs::create_dir_all(&src)?;
+        }
+        if src.exists() {
             #[cfg(unix)]
             std::os::unix::fs::symlink(&src, &dst).with_context(|| format!("linking {}", dst.display()))?;
         }
     }
     Ok(())
+}
+
+/// Moves everything in `from` into `to`, recursing into directories; never overwrites.
+fn merge_dir(from: &Path, to: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            std::fs::create_dir_all(&target)?;
+            merge_dir(&entry.path(), &target)?;
+        } else if !target.exists() {
+            std::fs::rename(entry.path(), &target).or_else(|_| std::fs::copy(entry.path(), &target).map(|_| ()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Claude Code stores a folder's conversations in projects/<path with non-alphanumerics as '-'>.
+fn has_conversation(cfg_dir: &Path, dir: &Path) -> bool {
+    let key: String = dir.to_string_lossy().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    std::fs::read_dir(cfg_dir.join("projects").join(key))
+        .map(|rd| rd.flatten().any(|e| e.path().extension().is_some_and(|x| x == "jsonl")))
+        .unwrap_or(false)
 }
 
 fn start_session(st: &State, def: &SessionDef) -> Result<()> {
@@ -324,6 +382,13 @@ fn start_session(st: &State, def: &SessionDef) -> Result<()> {
         cmd.push(format!("CLAUDE_CONFIG_DIR={}", cfg_dir.display()));
     }
     cmd.push(st.args.claude.clone());
+    if def.resume && has_conversation(&cfg_dir, &dir) {
+        cmd.push("--continue".into());
+    }
+    if def.skip_permissions {
+        cmd.push("--dangerously-skip-permissions".into());
+    }
+    cmd.extend(def.extra_args.iter().cloned());
     if logged_in {
         cmd.push("--remote-control".into());
         cmd.push(def.name.clone());
@@ -334,6 +399,7 @@ fn start_session(st: &State, def: &SessionDef) -> Result<()> {
     l.last_start = Some(Instant::now());
     l.rc_pending = !logged_in;
     l.limited = false;
+    l.bypass_answered = 0;
     Ok(())
 }
 
@@ -374,6 +440,16 @@ fn supervise(st: &State) {
         l.limited = counts.limit > l.limit_base;
         l.needs_login = NEEDS_LOGIN.is_match(&last_lines(&screen, 8))
             || def.is_some_and(|d| d.isolated && !has_credentials(&session_config_dir(st, d)));
+        // The user asked for skip-permissions, so accept its confirmation screen
+        // (its default answer is "No, exit").
+        let bypass = screen.lines().filter(|ln| BYPASS.is_match(ln)).count();
+        l.bypass_answered = l.bypass_answered.min(bypass);
+        if def.is_some_and(|d| d.skip_permissions) && bypass > l.bypass_answered {
+            l.bypass_answered = bypass;
+            let _ = tmux::key(&r.name, "Down");
+            std::thread::sleep(Duration::from_millis(150));
+            let _ = tmux::enter(&r.name);
+        }
         drive_login(st, &r.name, l, &screen, counts, def);
 
         view.push(SessionInfo {
@@ -391,6 +467,8 @@ fn supervise(st: &State) {
             managed: def.is_some(),
             autostart: def.is_some_and(|d| d.autostart && !d.stopped),
             needs_login: l.needs_login,
+            resume: def.is_some_and(|d| d.resume),
+            skip_permissions: def.is_some_and(|d| d.skip_permissions),
         });
     }
     for def in defs.iter().filter(|d| !running_names.contains(d.name.as_str())) {
@@ -407,6 +485,8 @@ fn supervise(st: &State) {
             managed: true,
             autostart: def.autostart && !def.stopped,
             needs_login: false,
+            resume: def.resume,
+            skip_permissions: def.skip_permissions,
         });
     }
     view.sort_by(|a, b| a.name.cmp(&b.name));
@@ -507,9 +587,9 @@ fn login_start(st: &State, name: &str, account: String) -> Result<()> {
     let screen = tmux::capture(name, HISTORY).unwrap_or_default();
     let baseline_urls = OAUTH_URL.find_iter(&screen).map(|m| m.as_str().to_string()).collect();
     let base = Counts::of(&screen);
-    // A fresh session (no credentials yet) is already sitting on the login screen.
-    let at_login_screen = st.def(name).is_some_and(|d| d.isolated && !has_credentials(&session_config_dir(st, &d)))
-        || LOGIN_METHOD.is_match(&last_lines(&screen, 8));
+    // A session that has never logged in is sitting in first-run setup / the login screen.
+    let fresh = st.def(name).is_some_and(|d| d.isolated && !has_credentials(&session_config_dir(st, &d)));
+    let at_login_screen = fresh || LOGIN_METHOD.is_match(&last_lines(&screen, 8));
     {
         let mut live = st.live.lock().unwrap();
         let l = live.entry(name.to_string()).or_default();
@@ -520,8 +600,15 @@ fn login_start(st: &State, name: &str, account: String) -> Result<()> {
             account,
             started: Instant::now(),
             baseline_urls,
-            // On the login screen already: its menu still needs one Enter.
-            base: if at_login_screen { Counts { method: base.method.saturating_sub(1), ..base } } else { base },
+            // Never logged in: everything on screen (theme picker, login menu, …) is live
+            // and needs answering. Otherwise only prompts that appear from now on count.
+            base: if fresh {
+                Counts { limit: base.limit, ..Counts::default() }
+            } else if at_login_screen {
+                Counts { method: base.method.saturating_sub(1), ..base }
+            } else {
+                base
+            },
             method_enters: 0,
             prompt_enters: 0,
             url_sent: false,
@@ -579,6 +666,9 @@ fn action(st: &State, name: &str, action: &str) -> Result<()> {
                 autostart: true,
                 stopped: false,
                 isolated: false,
+                resume: true,
+                skip_permissions: false,
+                extra_args: vec![],
             });
             st.save();
         }
@@ -596,12 +686,24 @@ fn action(st: &State, name: &str, action: &str) -> Result<()> {
             st.update_def(name, |d| d.autostart = false);
         }
         "remote_control" => tmux::type_line(name, "/remote-control")?,
+        "resume_on" | "resume_off" => {
+            st.update_def(name, |d| d.resume = action == "resume_on");
+        }
+        "skip_on" | "skip_off" => {
+            st.update_def(name, |d| d.skip_permissions = action == "skip_on");
+        }
         other => bail!("unknown action '{other}'"),
     }
     Ok(())
 }
 
-fn create_session(st: &State, name: Option<String>, cwd: String) -> Result<SessionInfo> {
+fn create_session(
+    st: &State,
+    name: Option<String>,
+    cwd: String,
+    resume: bool,
+    skip_permissions: bool,
+) -> Result<SessionInfo> {
     let dir = expand(&st.home, &cwd);
     if !dir.is_dir() {
         bail!("directory does not exist: {}", dir.display());
@@ -625,6 +727,9 @@ fn create_session(st: &State, name: Option<String>, cwd: String) -> Result<Sessi
         autostart: true,
         stopped: false,
         isolated: true,
+        resume,
+        skip_permissions,
+        extra_args: vec![],
     };
     st.cfg.lock().unwrap().sessions.push(def.clone());
     st.save();
@@ -642,6 +747,8 @@ fn create_session(st: &State, name: Option<String>, cwd: String) -> Result<Sessi
         managed: true,
         autostart: true,
         needs_login: true,
+        resume,
+        skip_permissions,
     })
 }
 
@@ -735,8 +842,9 @@ async fn handle(stream: TcpStream, st: Arc<State>) -> Result<()> {
                     ClientMsg::ListAccounts => {
                         let _ = out2.send(DaemonMsg::Accounts { accounts: vec![] });
                     }
-                    ClientMsg::StartSession { cwd, name, .. } => {
-                        let info = create_session(&st2, name, cwd)?;
+                    ClientMsg::StartSession { cwd, name, resume, skip_permissions, .. } => {
+                        let info =
+                            create_session(&st2, name, cwd, resume.unwrap_or(true), skip_permissions.unwrap_or(false))?;
                         let _ = out2.send(DaemonMsg::SessionStarted { session: info });
                     }
                     ClientMsg::SessionAction { session, action: a } => action(&st2, &session, &a)?,

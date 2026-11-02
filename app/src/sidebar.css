@@ -124,3 +124,7 @@ form.new button[type=submit] { background: var(--accent); border-color: var(--ac
 .pill.warn { color: #1f1e1d; background: #e0b04f; border-color: #e0b04f; }
 .sess.nologin .dot { background: #e0b04f; }
 .flash.ok { background: #24402a; color: #d6f5dc; }
+.host-err.big { font-size: 13px; margin: 18px 0; white-space: pre-wrap; }
+form.new .chk { flex: 1 1 100%; display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 12px; }
+form.new .chk input { flex: none; width: auto; }
+.nochk { display: inline-block; width: 0.7em; }

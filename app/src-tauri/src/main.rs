@@ -76,6 +76,9 @@ impl AppState {
 
 struct Hosts(Vec<(String, conn::HostHandle)>);
 
+/// Why hosts.toml couldn't be read, shown in the Host Sessions panel.
+struct HostsError(Option<String>);
+
 type Shared = Mutex<AppState>;
 
 #[derive(Serialize, Clone)]
@@ -457,8 +460,11 @@ fn host_send(app: AppHandle, host: String, msg: ClientMsg) -> Result<(), String>
 }
 
 #[tauri::command]
-fn hosts_path() -> String {
-    hosts::path().map(|p| p.display().to_string()).unwrap_or_default()
+fn hosts_path(err: State<HostsError>) -> serde_json::Value {
+    serde_json::json!({
+        "path": hosts::path().map(|p| p.display().to_string()).unwrap_or_default(),
+        "error": err.0,
+    })
 }
 
 #[tauri::command]
@@ -620,10 +626,11 @@ fn main() {
                 create_account_webview(app.handle(), &cfg.start_url, a)?;
             }
 
-            let host_cfgs = hosts::load().unwrap_or_else(|e| {
-                eprintln!("hosts.toml error: {e:#}");
-                hosts::HostsFile::default()
-            });
+            let (host_cfgs, hosts_err) = match hosts::load() {
+                Ok(h) => (h, None),
+                Err(e) => (hosts::HostsFile::default(), Some(format!("{e:#}"))),
+            };
+            app.manage(HostsError(hosts_err));
             let handles =
                 host_cfgs.hosts.into_iter().map(|h| (h.name.clone(), conn::spawn(app.handle().clone(), h))).collect();
             app.manage(Hosts(handles));

@@ -11,6 +11,7 @@ let state = { accounts: [], active: null, panel: null };
 /** hosts[name] = { url, status, error, hostname, sessions: [] } */
 const hosts = {};
 const hostOrder = [];
+let hostsError = null;
 /** Account switches in progress, keyed "host/session": { host, session, accountId, accountName, sessionName, status, url } */
 const switches = new Map();
 const key = (host, session) => `${host}/${session}`;
@@ -117,6 +118,8 @@ function renderSessionsPanel() {
     const form = newFormOpen.has(name) ? `<form class="new" data-host="${esc(name)}">
         <input name="cwd" placeholder="Folder on ${esc(h.hostname ?? name)}, e.g. ~/21wild" autocomplete="off" />
         <input name="name" placeholder="Name (defaults to folder name)" autocomplete="off" />
+        <label class="chk"><input type="checkbox" name="resume" checked /> Resume the folder’s last conversation</label>
+        <label class="chk"><input type="checkbox" name="skip" checked /> Skip permissions (--dangerously-skip-permissions)</label>
         <button type="submit">Start</button><button type="button" data-cancel-new="${esc(name)}">Cancel</button>
       </form>` : '';
     return `<section class="host">
@@ -130,7 +133,9 @@ function renderSessionsPanel() {
       ${form}
       <ul>${sessions || (h.status === 'connected' ? '<li class="none">No sessions yet. Add a game folder with “New session”.</li>' : '')}</ul>
     </section>`;
-  }).join('') : '<p class="empty-block">No hosts configured yet. Add your machines to the hosts file below, then restart the app.</p>';
+  }).join('') : hostsError
+    ? `<p class="host-err big">The hosts file has an error, so no hosts were loaded. Fix it and restart the app:<br><code>${esc(hostsError)}</code></p>`
+    : '<p class="empty-block">No hosts configured yet. Add your machines to the hosts file below, then restart the app.</p>';
 }
 
 // ---- context menu ---------------------------------------------------------------
@@ -157,7 +162,10 @@ function openMenu(x, y, host, sessionId) {
     <hr>
     ${s.managed ? (s.running ? item('restart', 'Restart') + item('stop', 'Stop') : item('start', 'Start'))
       : item('manage', 'Manage (autostart + restart)')}
-    ${s.managed ? item(s.autostart ? 'autostart_off' : 'autostart_on', s.autostart ? 'Don’t start automatically' : 'Start automatically') : ''}
+    ${s.managed ? `<hr><div class="ctx-label">On start (applies after Restart)</div>
+      ${item(s.autostart ? 'autostart_off' : 'autostart_on', `${s.autostart ? '✓' : '<span class="nochk"></span>'} Start automatically`)}
+      ${item(s.resume ? 'resume_off' : 'resume_on', `${s.resume ? '✓' : '<span class="nochk"></span>'} Resume last conversation`)}
+      ${item(s.skip_permissions ? 'skip_off' : 'skip_on', `${s.skip_permissions ? '✓' : '<span class="nochk"></span>'} Skip permissions`)}<hr>` : ''}
     ${s.managed ? item('unmanage', 'Remove from list', true, 'danger') : ''}`;
   menu.dataset.host = host;
   menu.dataset.session = sessionId;
@@ -294,6 +302,7 @@ $('#hosts').addEventListener('submit', (e) => {
   const f = e.target;
   hostSend(f.dataset.host, {
     type: 'start_session', account: 'default', cwd: f.cwd.value.trim() || '~', name: f.name.value.trim() || null, mode: 'terminal',
+    resume: f.resume.checked, skip_permissions: f.skip.checked,
   });
 });
 
@@ -351,7 +360,9 @@ setInterval(render, 60_000);
 (async () => {
   state = await invoke('get_state');
   $('#autostart').checked = await invoke('get_autostart');
-  $('#hostspath').textContent = await invoke('hosts_path');
+  const hp = await invoke('hosts_path');
+  $('#hostspath').textContent = hp.path;
+  hostsError = hp.error;
   for (const h of await invoke('list_hosts')) {
     hostOrder.push(h.name);
     Object.assign(hostOf(h.name), { url: h.url, status: h.status.status, error: h.status.error });

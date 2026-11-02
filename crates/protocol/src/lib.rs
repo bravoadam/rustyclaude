@@ -60,6 +60,12 @@ pub struct SessionInfo {
     /// Claude is asking to log in (or has no credentials yet).
     #[serde(default)]
     pub needs_login: bool,
+    /// Managed sessions: start with `--continue` (resume the folder's last conversation).
+    #[serde(default)]
+    pub resume: bool,
+    /// Managed sessions: start with `--dangerously-skip-permissions`.
+    #[serde(default)]
+    pub skip_permissions: bool,
 }
 
 /// Client -> daemon.
@@ -80,6 +86,12 @@ pub enum ClientMsg {
         /// Chat mode: Claude Code `--permission-mode` (default, acceptEdits, plan, bypassPermissions).
         #[serde(default)]
         permission_mode: Option<String>,
+        /// tmux sessions: resume the folder's last conversation on start (default true).
+        #[serde(default)]
+        resume: Option<bool>,
+        /// tmux sessions: run with --dangerously-skip-permissions.
+        #[serde(default)]
+        skip_permissions: Option<bool>,
     },
     /// Chat mode: send a user turn.
     SendChat { session: String, text: String, #[serde(default)] attachments: Vec<Attachment> },
@@ -91,7 +103,8 @@ pub enum ClientMsg {
     /// Terminal mode: abandon an in-progress switch (sends Escape).
     LoginCancel { session: String },
     /// tmux sessions: "start" | "stop" | "restart" | "manage" | "unmanage" |
-    /// "autostart_on" | "autostart_off" | "remote_control".
+    /// "autostart_on" | "autostart_off" | "remote_control" | "resume_on" | "resume_off" |
+    /// "skip_on" | "skip_off" (the last four apply on the next start).
     SessionAction { session: String, action: String },
     /// Terminal mode: type a line into the session (e.g. "/remote-control").
     Command { session: String, line: String },
