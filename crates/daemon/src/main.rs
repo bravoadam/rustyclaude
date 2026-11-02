@@ -45,9 +45,16 @@ static LOGIN_FAILED: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)oauth error|login failed|invalid (authorization )?code").unwrap());
 /// --dangerously-skip-permissions confirmation ("No, exit" is the default!).
 static BYPASS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)yes, i accept").unwrap());
+/// Folder trust question ("No, exit" is the default!). The user chose this folder for
+/// the session, so it's trusted.
+static TRUST: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)yes, i trust this folder").unwrap());
+/// The selected line of an Ink select menu.
+static CURSOR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*❯").unwrap());
+/// Footer under an Ink select menu.
+static MENU_FOOTER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)enter to confirm").unwrap());
 /// First-run / post-login prompts where Enter takes the sensible default.
 static ENTER_PROMPTS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)press enter to continue|choose the text style|do you trust the files|yes, proceed|security notes").unwrap()
+    Regex::new(r"(?i)press enter to continue|choose the text style|security notes").unwrap()
 });
 
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
@@ -189,8 +196,8 @@ struct Live {
     last_settle_enter: Option<Instant>,
     /// Started without --remote-control (no login yet); enable it once logged in.
     rc_pending: bool,
-    /// Skip-permissions confirmations already answered (by line count in scrollback).
-    bypass_answered: usize,
+    /// Last time a "Yes" menu (skip-permissions warning, folder trust) was answered.
+    last_menu_answer: Option<Instant>,
 }
 
 struct State {
@@ -399,7 +406,7 @@ fn start_session(st: &State, def: &SessionDef) -> Result<()> {
     l.last_start = Some(Instant::now());
     l.rc_pending = !logged_in;
     l.limited = false;
-    l.bypass_answered = 0;
+    l.last_menu_answer = None;
     Ok(())
 }
 
@@ -442,13 +449,19 @@ fn supervise(st: &State) {
             || def.is_some_and(|d| d.isolated && !has_credentials(&session_config_dir(st, d)));
         // The user asked for skip-permissions, so accept its confirmation screen
         // (its default answer is "No, exit").
-        let bypass = screen.lines().filter(|ln| BYPASS.is_match(ln)).count();
-        l.bypass_answered = l.bypass_answered.min(bypass);
-        if def.is_some_and(|d| d.skip_permissions) && bypass > l.bypass_answered {
-            l.bypass_answered = bypass;
-            let _ = tmux::key(&r.name, "Down");
-            std::thread::sleep(Duration::from_millis(150));
-            let _ = tmux::enter(&r.name);
+        let menu_ok = l.last_menu_answer.is_none_or(|t| t.elapsed() > Duration::from_millis(2500));
+        let answer = if !menu_ok {
+            None
+        } else if def.is_some_and(|d| d.skip_permissions) && live_menu(&screen, &BYPASS) {
+            Some(&*BYPASS)
+        } else if def.is_some() && live_menu(&screen, &TRUST) {
+            Some(&*TRUST)
+        } else {
+            None
+        };
+        if let Some(option) = answer {
+            l.last_menu_answer = Some(Instant::now());
+            let _ = choose(&r.name, &screen, option);
         }
         drive_login(st, &r.name, l, &screen, counts, def);
 
@@ -500,6 +513,33 @@ fn supervise(st: &State) {
     if changed {
         let _ = st.notify.send(DaemonMsg::Sessions { sessions: view });
     }
+}
+
+/// A select menu containing `option` is what the session is waiting on right now:
+/// it's at the bottom of the screen, with the cursor and the "Enter to confirm" footer.
+fn live_menu(screen: &str, option: &Regex) -> bool {
+    let tail = last_lines(screen, 8);
+    let lines: Vec<&str> = tail.lines().collect();
+    let footer_at_bottom = lines.iter().rev().take(2).any(|l| MENU_FOOTER.is_match(l));
+    let Some(opt) = lines.iter().rposition(|l| option.is_match(l)) else { return false };
+    let cursor_in_menu = lines[..lines.len()].iter().enumerate().any(|(i, l)| CURSOR.is_match(l) && i + 6 >= opt && i <= opt + 6);
+    footer_at_bottom && cursor_in_menu
+}
+
+/// Selects the menu option matching `option` (moving from the highlighted line) and
+/// confirms it. Only looks at the bottom of the screen, where the live menu is.
+fn choose(name: &str, screen: &str, option: &Regex) -> Result<()> {
+    let tail = last_lines(screen, 8);
+    let lines: Vec<&str> = tail.lines().collect();
+    let target = lines.iter().rposition(|l| option.is_match(l)).context("option not on screen")?;
+    let cursor = lines.iter().rposition(|l| CURSOR.is_match(l)).unwrap_or(target);
+    let (key, steps) = if target >= cursor { ("Down", target - cursor) } else { ("Up", cursor - target) };
+    for _ in 0..steps.min(10) {
+        tmux::key(name, key)?;
+        std::thread::sleep(Duration::from_millis(120));
+    }
+    std::thread::sleep(Duration::from_millis(150));
+    tmux::enter(name)
 }
 
 fn last_lines(s: &str, n: usize) -> String {
