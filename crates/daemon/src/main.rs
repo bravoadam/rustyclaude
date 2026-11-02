@@ -584,9 +584,11 @@ fn supervise(st: &State) {
 }
 
 /// Types /remote-control and remembers it, so its confirmation menu gets answered.
+/// Passes the tmux session name, the same name `--remote-control <name>` uses at
+/// start, so the session keeps one name in claude.ai across restarts and moves.
 fn request_rc(name: &str, l: &mut Live) {
     l.rc_requested = Some(Instant::now());
-    let _ = tmux::type_line(name, "/remote-control");
+    let _ = tmux::type_line(name, &format!("/remote-control {name}"));
 }
 
 /// A select menu containing `option` is what the session is waiting on right now:
