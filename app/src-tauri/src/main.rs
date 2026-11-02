@@ -34,6 +34,9 @@ use tauri_plugin_opener::OpenerExt;
 use tauri_plugin_window_state::{StateFlags, WindowExt};
 
 const SIDEBAR_WIDTH: f64 = 72.0;
+/// Draggable strip above the account view (the native title bar is hidden).
+const TITLEBAR_HEIGHT: f64 = 32.0;
+const TITLEBAR: &str = "titlebar";
 const MAIN: &str = "main";
 pub const SIDEBAR: &str = "sidebar";
 const TOGGLE_HOTKEY: &str = "ctrl+alt+c";
@@ -137,6 +140,7 @@ fn refresh(app: &AppHandle) {
             let _ = app.set_menu(menu);
         }
     }
+    let _ = app.emit_to(TITLEBAR, "state", v.clone());
     let _ = app.emit_to(SIDEBAR, "state", v);
 }
 
@@ -153,10 +157,20 @@ fn layout(app: &AppHandle) {
         let _ = sb.set_size(LogicalSize::new(w, size.height));
     }
     let content_w = (size.width - SIDEBAR_WIDTH).max(1.0);
+    let content_h = (size.height - TITLEBAR_HEIGHT).max(1.0);
+    if let Some(tb) = app.get_webview(TITLEBAR) {
+        let _ = tb.set_position(LogicalPosition::new(SIDEBAR_WIDTH, 0.0));
+        let _ = tb.set_size(LogicalSize::new(content_w, TITLEBAR_HEIGHT));
+        if st.wide() {
+            let _ = tb.hide();
+        } else {
+            let _ = tb.show();
+        }
+    }
     for a in &st.cfg.accounts {
         if let Some(wv) = app.get_webview(&a.label()) {
-            let _ = wv.set_position(LogicalPosition::new(SIDEBAR_WIDTH, 0.0));
-            let _ = wv.set_size(LogicalSize::new(content_w, size.height));
+            let _ = wv.set_position(LogicalPosition::new(SIDEBAR_WIDTH, TITLEBAR_HEIGHT));
+            let _ = wv.set_size(LogicalSize::new(content_w, content_h));
             if !st.wide() && st.active.as_deref() == Some(a.id.as_str()) {
                 let _ = wv.show();
             } else {
@@ -225,8 +239,8 @@ fn create_account_webview(app: &AppHandle, start_url: &str, acct: &Account) -> t
     let size = win.inner_size()?.to_logical::<f64>(win.scale_factor()?);
     let wv = win.add_child(
         builder,
-        LogicalPosition::new(SIDEBAR_WIDTH, 0.0),
-        LogicalSize::new((size.width - SIDEBAR_WIDTH).max(1.0), size.height),
+        LogicalPosition::new(SIDEBAR_WIDTH, TITLEBAR_HEIGHT),
+        LogicalSize::new((size.width - SIDEBAR_WIDTH).max(1.0), (size.height - TITLEBAR_HEIGHT).max(1.0)),
     )?;
     wv.hide()?;
     Ok(())
@@ -621,6 +635,11 @@ fn main() {
                 WebviewBuilder::new(SIDEBAR, WebviewUrl::App("index.html".into())),
                 LogicalPosition::new(0.0, 0.0),
                 LogicalSize::new(SIDEBAR_WIDTH, size.height),
+            )?;
+            win.add_child(
+                WebviewBuilder::new(TITLEBAR, WebviewUrl::App("index.html#titlebar".into())),
+                LogicalPosition::new(SIDEBAR_WIDTH, 0.0),
+                LogicalSize::new((size.width - SIDEBAR_WIDTH).max(1.0), TITLEBAR_HEIGHT),
             )?;
             for a in &cfg.accounts {
                 create_account_webview(app.handle(), &cfg.start_url, a)?;

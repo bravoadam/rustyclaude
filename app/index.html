@@ -17,8 +17,8 @@
 
     <section id="panel-accounts" class="panel" hidden>
       <div class="panel-inner">
-        <header>
-          <h1>Accounts</h1>
+        <header data-tauri-drag-region>
+          <h1 data-tauri-drag-region>Accounts</h1>
           <button class="close-panel" title="Close (Esc)">Done</button>
         </header>
         <p class="sub">Each account gets its own isolated, persistent sign-in. Switch with ⌘1–⌘9.</p>
@@ -37,8 +37,8 @@
 
     <section id="panel-sessions" class="panel" hidden>
       <div class="panel-inner">
-        <header>
-          <h1>Host sessions</h1>
+        <header data-tauri-drag-region>
+          <h1 data-tauri-drag-region>Host sessions</h1>
           <button class="close-panel" title="Close (Esc)">Done</button>
         </header>
         <p class="sub">Sessions started here run with Remote Control, so they also show up in the matching account's tab.
@@ -50,6 +50,6 @@
     </section>
 
     <div id="ctx" hidden></div>
-    <script type="module" src="/src/sidebar.js"></script>
+    <script type="module" src="/src/entry.js"></script>
   </body>
 </html>

@@ -128,3 +128,4 @@ form.new button[type=submit] { background: var(--accent); border-color: var(--ac
 form.new .chk { flex: 1 1 100%; display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 12px; }
 form.new .chk input { flex: none; width: auto; }
 .nochk { display: inline-block; width: 0.7em; }
+.panel header { padding-top: 8px; }

@@ -1,7 +1,10 @@
 {
   "identifier": "sidebar",
-  "description": "The local account-switcher UI.",
-  "webviews": ["sidebar"],
+  "description": "The local UI: account sidebar and title bar.",
+  "webviews": [
+    "sidebar",
+    "titlebar"
+  ],
   "permissions": [
     "core:default",
     "allow-get-state",
@@ -19,6 +22,8 @@
     "allow-begin-oauth",
     "allow-cancel-oauth",
     "allow-get-autostart",
-    "allow-set-autostart"
+    "allow-set-autostart",
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize"
   ]
 }
