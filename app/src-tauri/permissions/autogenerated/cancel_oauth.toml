@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cancel-oauth"
+description = "Enables the cancel_oauth command without any pre-configured scope."
+commands.allow = ["cancel_oauth"]
+
+[[permission]]
+identifier = "deny-cancel-oauth"
+description = "Denies the cancel_oauth command without any pre-configured scope."
+commands.deny = ["cancel_oauth"]

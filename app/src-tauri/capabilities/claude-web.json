@@ -1,0 +1,7 @@
+{
+  "identifier": "claude-web",
+  "description": "claude.ai pages may only forward notifications. Nothing else is exposed to remote content.",
+  "webviews": ["acct-*"],
+  "remote": { "urls": ["https://claude.ai/*", "https://*.claude.ai/*"] },
+  "permissions": ["allow-web-notify"]
+}

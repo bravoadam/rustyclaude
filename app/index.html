@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RustyClaude</title>
+  </head>
+  <body>
+    <nav id="rail" data-tauri-drag-region>
+      <div class="traffic-spacer" data-tauri-drag-region></div>
+      <div id="accounts"></div>
+      <button id="add" class="rail-btn" title="Add account">+</button>
+      <div class="grow" data-tauri-drag-region></div>
+      <button id="sessions-btn" class="rail-btn icon" title="Host sessions (⌘⇧S)">⧉<span id="sessions-badge" class="badge" hidden></span></button>
+      <button id="gear" class="rail-btn icon" title="Manage accounts (⌘,)">⚙</button>
+    </nav>
+
+    <section id="panel-accounts" class="panel" hidden>
+      <div class="panel-inner">
+        <header>
+          <h1>Accounts</h1>
+          <button class="close-panel" title="Close (Esc)">Done</button>
+        </header>
+        <p class="sub">Each account gets its own isolated, persistent sign-in. Switch with ⌘1–⌘9.</p>
+        <ul id="acct-list"></ul>
+        <form id="add-form">
+          <input name="name" placeholder="New account name, e.g. Work" autocomplete="off" />
+          <button type="submit">Add account</button>
+        </form>
+        <h2>App</h2>
+        <label class="toggle"><input type="checkbox" id="autostart" /> Open at login</label>
+        <p class="sub">Show or hide the window from anywhere: <kbd id="hotkey"></kbd></p>
+        <p class="sub">Closing the window keeps RustyClaude running so notifications still arrive. Quit with ⌘Q.</p>
+        <p class="sub small">Config: <code id="cfgpath"></code></p>
+      </div>
+    </section>
+
+    <section id="panel-sessions" class="panel" hidden>
+      <div class="panel-inner">
+        <header>
+          <h1>Host sessions</h1>
+          <button class="close-panel" title="Close (Esc)">Done</button>
+        </header>
+        <p class="sub">Sessions started here run with Remote Control, so they also show up in the matching account's tab.
+          Right-click a session to move it to another account.</p>
+        <div id="switches"></div>
+        <div id="hosts"></div>
+        <p class="sub small">Hosts: <code id="hostspath"></code></p>
+      </div>
+    </section>
+
+    <div id="ctx" hidden></div>
+    <script type="module" src="/src/sidebar.js"></script>
+  </body>
+</html>

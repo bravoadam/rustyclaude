@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RustyClaude</title>
+  </head>
+  <body>
+    <aside id="sidebar">
+      <header><span class="logo"></span>RustyClaude</header>
+      <div id="hosts"></div>
+      <footer id="config-hint"></footer>
+    </aside>
+    <main>
+      <div id="titlebar">
+        <span id="title">No session selected</span><span id="title-meta"></span>
+        <form id="open-file" hidden><input name="path" placeholder="Open file on host…" /></form>
+      </div>
+      <div id="view">
+        <div id="term-wrap" hidden><div id="term"></div></div>
+        <div id="chat" hidden></div>
+        <div id="empty">Pick a session on the left, or start one with <b>+</b>.</div>
+      </div>
+    </main>
+    <div id="viewer" hidden>
+      <div class="viewer-bar"><span id="viewer-name"></span><a id="viewer-save" download>Save</a><button id="viewer-close">Close</button></div>
+      <div id="viewer-body"></div>
+    </div>
+    <div id="toasts"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

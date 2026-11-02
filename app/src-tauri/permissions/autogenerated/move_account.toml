@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-move-account"
+description = "Enables the move_account command without any pre-configured scope."
+commands.allow = ["move_account"]
+
+[[permission]]
+identifier = "deny-move-account"
+description = "Denies the move_account command without any pre-configured scope."
+commands.deny = ["move_account"]

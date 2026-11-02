@@ -1,0 +1,24 @@
+{
+  "identifier": "sidebar",
+  "description": "The local account-switcher UI.",
+  "webviews": ["sidebar"],
+  "permissions": [
+    "core:default",
+    "allow-get-state",
+    "allow-select-account",
+    "allow-add-account",
+    "allow-rename-account",
+    "allow-set-account-color",
+    "allow-move-account",
+    "allow-remove-account",
+    "allow-set-panel",
+    "allow-list-hosts",
+    "allow-host-send",
+    "allow-hosts-path",
+    "allow-notify-native",
+    "allow-begin-oauth",
+    "allow-cancel-oauth",
+    "allow-get-autostart",
+    "allow-set-autostart"
+  ]
+}
