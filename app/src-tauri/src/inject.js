@@ -1,5 +1,5 @@
 // Injected into every claude.ai account webview, before the page's own scripts.
-// Turns web notifications into native macOS notifications (tagged with the account).
+// Turns web notifications into native desktop notifications (tagged with the account).
 (() => {
   if (window.__rustyClaude) return;
   window.__rustyClaude = true;

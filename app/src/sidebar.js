@@ -1,3 +1,4 @@
+const MOD = /Mac/.test(navigator.platform) ? '⌘' : 'Ctrl+';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import './sidebar.css';
@@ -39,7 +40,7 @@ function render() {
 
   $('#accounts').innerHTML = accounts.map((a, i) => `
     <button class="acct ${a.id === active && !panel ? 'active' : ''}" data-id="${esc(a.id)}"
-      title="${esc(a.name)}${i < 9 ? `  ⌘${i + 1}` : ''}" style="--c:${esc(a.color)}">
+      title="${esc(a.name)}${i < 9 ? `  ${MOD}${i + 1}` : ''}" style="--c:${esc(a.color)}">
       <span class="avatar">${esc(initials(a.name))}</span>
       ${a.attention ? '<span class="badge"></span>' : ''}
       <span class="acct-name">${esc(a.name)}</span>

@@ -9,6 +9,8 @@
 
 mod config;
 mod conn;
+#[cfg(target_os = "linux")]
+mod gtk_layout;
 mod hosts;
 
 use std::{
@@ -24,8 +26,7 @@ use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     webview::{DownloadEvent, NewWindowResponse, WebviewBuilder},
     window::WindowBuilder,
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, RunEvent, State, TitleBarStyle, Url, WebviewUrl,
-    WindowEvent, Wry,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Url, WebviewUrl, WindowEvent, Wry,
 };
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
@@ -69,6 +70,8 @@ struct AppState {
     attention: HashSet<String>,
     /// Keyed by account id.
     pending_oauth: HashMap<String, PendingOauth>,
+    /// The (id, name) pairs the current menu was built from.
+    menu_accounts: Option<Vec<(String, String)>>,
 }
 
 impl AppState {
@@ -127,12 +130,20 @@ fn view(st: &AppState) -> StateView {
 fn refresh(app: &AppHandle) {
     let (v, rebuild_menu) = {
         let st = app.state::<Shared>();
-        let st = st.lock().unwrap();
-        (view(&st), true)
+        let mut st = st.lock().unwrap();
+        let v = view(&st);
+        // Only the account list appears in the menu; rebuilding it needlessly upsets GTK.
+        let key: Vec<_> = v.accounts.iter().map(|a| (a.id.clone(), a.name.clone())).collect();
+        let changed = st.menu_accounts.as_ref() != Some(&key);
+        st.menu_accounts = Some(key);
+        (v, changed)
     };
     layout(app);
+    let n = v.accounts.iter().filter(|a| a.attention).count() as i64;
+    #[cfg(target_os = "linux")]
+    gtk_layout::set_badge(n);
+    #[cfg(not(target_os = "linux"))]
     if let Some(win) = app.get_window(MAIN) {
-        let n = v.accounts.iter().filter(|a| a.attention).count() as i64;
         let _ = win.set_badge_count(if n > 0 { Some(n) } else { None });
     }
     if rebuild_menu {
@@ -144,23 +155,37 @@ fn refresh(app: &AppHandle) {
     let _ = app.emit_to(SIDEBAR, "state", v);
 }
 
+#[cfg(target_os = "linux")]
+fn place(wv: &tauri::Webview, x: f64, y: f64, w: f64, h: f64) {
+    gtk_layout::place(wv, x, y, w, h);
+}
+
+#[cfg(not(target_os = "linux"))]
+fn place(wv: &tauri::Webview, x: f64, y: f64, w: f64, h: f64) {
+    let _ = wv.set_position(LogicalPosition::new(x, y));
+    let _ = wv.set_size(LogicalSize::new(w, h));
+}
+
 fn layout(app: &AppHandle) {
     let Some(win) = app.get_window(MAIN) else { return };
     let (Ok(size), Ok(scale)) = (win.inner_size(), win.scale_factor()) else { return };
-    let size = size.to_logical::<f64>(scale);
+    #[allow(unused_mut)]
+    let mut size = size.to_logical::<f64>(scale);
+    #[cfg(target_os = "linux")]
+    if let Some((w, h)) = gtk_layout::area() {
+        size = LogicalSize::new(w, h);
+    }
     let st = app.state::<Shared>();
     let st = st.lock().unwrap();
 
     if let Some(sb) = app.get_webview(SIDEBAR) {
         let w = if st.wide() { size.width } else { SIDEBAR_WIDTH };
-        let _ = sb.set_position(LogicalPosition::new(0.0, 0.0));
-        let _ = sb.set_size(LogicalSize::new(w, size.height));
+        place(&sb, 0.0, 0.0, w, size.height);
     }
     let content_w = (size.width - SIDEBAR_WIDTH).max(1.0);
     let content_h = (size.height - TITLEBAR_HEIGHT).max(1.0);
     if let Some(tb) = app.get_webview(TITLEBAR) {
-        let _ = tb.set_position(LogicalPosition::new(SIDEBAR_WIDTH, 0.0));
-        let _ = tb.set_size(LogicalSize::new(content_w, TITLEBAR_HEIGHT));
+        place(&tb, SIDEBAR_WIDTH, 0.0, content_w, TITLEBAR_HEIGHT);
         if st.wide() {
             let _ = tb.hide();
         } else {
@@ -169,8 +194,7 @@ fn layout(app: &AppHandle) {
     }
     for a in &st.cfg.accounts {
         if let Some(wv) = app.get_webview(&a.label()) {
-            let _ = wv.set_position(LogicalPosition::new(SIDEBAR_WIDTH, TITLEBAR_HEIGHT));
-            let _ = wv.set_size(LogicalSize::new(content_w, content_h));
+            place(&wv, SIDEBAR_WIDTH, TITLEBAR_HEIGHT, content_w, content_h);
             if !st.wide() && st.active.as_deref() == Some(a.id.as_str()) {
                 let _ = wv.show();
             } else {
@@ -197,8 +221,14 @@ fn create_account_webview(app: &AppHandle, start_url: &str, acct: &Account) -> t
     let acct_id = acct.id.clone();
     let name = acct.name.clone();
 
-    let builder = WebviewBuilder::new(acct.label(), WebviewUrl::External(url))
-        .data_store_identifier(acct.store_id())
+    let builder = WebviewBuilder::new(acct.label(), WebviewUrl::External(url));
+    // Per-account storage is what keeps sign-ins separate. data_store_identifier is
+    // ignored outside macOS/iOS; elsewhere each account gets its own data directory.
+    #[cfg(target_os = "macos")]
+    let builder = builder.data_store_identifier(acct.store_id());
+    #[cfg(not(target_os = "macos"))]
+    let builder = builder.data_directory(app.path().app_data_dir()?.join("accounts").join(&acct.id));
+    let builder = builder
         .user_agent(USER_AGENT)
         .initialization_script(include_str!("inject.js"))
         .on_navigation(move |url| {
@@ -207,6 +237,9 @@ fn create_account_webview(app: &AppHandle, start_url: &str, acct: &Account) -> t
         })
         .on_new_window(move |url, _features| {
             if host_allowed_in_app(&url) {
+                #[cfg(target_os = "linux")]
+                return gtk_layout::popup(&app_for_popups, _features, USER_AGENT);
+                #[cfg(not(target_os = "linux"))]
                 NewWindowResponse::Allow
             } else {
                 let _ = app_for_popups.opener().open_url(url.as_str(), None::<&str>);
@@ -280,6 +313,26 @@ fn build_menu(app: &AppHandle, v: &StateView) -> tauri::Result<Menu<Wry>> {
     Ok(menu)
 }
 
+/// There's no Dock outside macOS, so the tray is how a closed window comes back
+/// (the global hotkey doesn't work on Wayland) and how the app is quit.
+#[cfg(not(target_os = "macos"))]
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    let menu = Menu::with_items(
+        app,
+        &[
+            &MenuItem::with_id(app, "tray-show", "Show RustyClaude", true, None::<&str>)?,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuItem::with_id(app, "tray-quit", "Quit", true, None::<&str>)?,
+        ],
+    )?;
+    let mut tray = tauri::tray::TrayIconBuilder::with_id("main").menu(&menu).tooltip("RustyClaude");
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
+}
+
 fn active_webview(app: &AppHandle) -> Option<tauri::Webview> {
     let id = app.state::<Shared>().lock().unwrap().active.clone()?;
     app.get_webview(&format!("acct-{id}"))
@@ -325,6 +378,26 @@ fn show_main(app: &AppHandle) {
         let _ = win.set_focus();
     }
     clear_active_attention(app);
+}
+
+fn toggle_main(app: &AppHandle) {
+    if let Some(win) = app.get_window(MAIN) {
+        let up = win.is_visible().unwrap_or(false) && win.is_focused().unwrap_or(false);
+        if up {
+            let _ = win.hide();
+        } else {
+            show_main(app);
+        }
+    }
+}
+
+/// Global key grabs only work on X11. On Wayland the desktop owns the shortcut and runs
+/// `rustyclaude --toggle` instead (see deploy/install-linux-app.sh).
+fn can_grab_hotkey() -> bool {
+    #[cfg(target_os = "linux")]
+    return std::env::var_os("WAYLAND_DISPLAY").is_none();
+    #[cfg(not(target_os = "linux"))]
+    true
 }
 
 fn clear_active_attention(app: &AppHandle) {
@@ -578,7 +651,21 @@ fn web_notify(app: AppHandle, webview: tauri::Webview, title: String, body: Stri
 // ---- app ---------------------------------------------------------------------
 
 fn main() {
+    // Becomes the Wayland app id, so the window matches RustyClaude.desktop: one dock icon,
+    // and the badge, which Tauri sends for "<productName>.desktop".
+    #[cfg(target_os = "linux")]
+    gtk::glib::set_prgname(Some("RustyClaude"));
+
     tauri::Builder::default()
+        // Must be first. A dock click on a hidden window starts a second process, which
+        // hands over to this one and exits; two would also fight over the same storage.
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if args.iter().any(|a| a == "--toggle") {
+                toggle_main(app);
+            } else {
+                show_main(app);
+            }
+        }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
@@ -593,14 +680,7 @@ fn main() {
                     if ev.state() != ShortcutState::Pressed {
                         return;
                     }
-                    if let Some(win) = app.get_window(MAIN) {
-                        let up = win.is_visible().unwrap_or(false) && win.is_focused().unwrap_or(false);
-                        if up {
-                            let _ = win.hide();
-                        } else {
-                            show_main(app);
-                        }
-                    }
+                    toggle_main(app);
                 })
                 .build(),
         )
@@ -621,14 +701,17 @@ fn main() {
                 st.cfg = cfg.clone();
             }
 
-            let win = WindowBuilder::new(app, MAIN)
+            let builder = WindowBuilder::new(app, MAIN)
                 .title("RustyClaude")
                 .inner_size(1320.0, 860.0)
-                .min_inner_size(720.0, 480.0)
-                .title_bar_style(TitleBarStyle::Overlay)
-                .hidden_title(true)
-                .build()?;
+                .min_inner_size(720.0, 480.0);
+            #[cfg(target_os = "macos")]
+            let builder = builder.title_bar_style(tauri::TitleBarStyle::Overlay).hidden_title(true);
+            let win = builder.build()?;
             let _ = win.restore_state(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED);
+
+            #[cfg(target_os = "linux")]
+            gtk_layout::install(app.handle(), &win)?;
 
             let size = win.inner_size()?.to_logical::<f64>(win.scale_factor()?);
             win.add_child(
@@ -668,8 +751,13 @@ fn main() {
                 _ => {}
             });
 
-            if let Err(e) = app.global_shortcut().register(TOGGLE_HOTKEY) {
-                eprintln!("could not register {TOGGLE_HOTKEY}: {e}");
+            #[cfg(not(target_os = "macos"))]
+            build_tray(app.handle())?;
+
+            if can_grab_hotkey() {
+                if let Err(e) = app.global_shortcut().register(TOGGLE_HOTKEY) {
+                    eprintln!("could not register {TOGGLE_HOTKEY}: {e}");
+                }
             }
 
             refresh(app.handle());
@@ -702,6 +790,8 @@ fn main() {
                         let _ = wv.navigate(url);
                     }
                 }
+                "tray-show" => show_main(app),
+                "tray-quit" => app.exit(0),
                 "next" => cycle(app, 1),
                 "prev" => cycle(app, -1),
                 "settings" | "sessions" => {
@@ -743,9 +833,10 @@ fn main() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building RustyClaude")
-        .run(|app, ev| {
-            if let RunEvent::Reopen { .. } = ev {
-                show_main(app); // Dock icon click brings the hidden window back
+        .run(|_app, _ev| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _ev {
+                show_main(_app); // Dock icon click brings the hidden window back
             }
         });
 }

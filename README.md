@@ -1,6 +1,6 @@
 # RustyClaude
 
-A native macOS app for using several Claude accounts at once, with a way to move Claude Code
+A native macOS and Linux app for using several Claude accounts at once, with a way to move Claude Code
 sessions between accounts when one hits its usage limit.
 
 ```
@@ -16,14 +16,27 @@ archive/          earlier daemon-only client UI (terminal + chat views), kept fo
 - ⌘1–⌘9 switch accounts, ⌘⇧[ / ⌘⇧] cycle, ⌘, manages accounts, ⌘⇧S opens Host Sessions,
   ⌃⌥C shows/hides the window from anywhere.
 - Web notifications become macOS notifications tagged with the account; accounts needing
-  attention get a red dot and a Dock badge. Closing the window keeps the app running.
+  attention get a red dot and a dock badge. Closing the window keeps the app running.
 - Sign-in popups stay in the app; other links open in your browser; downloads go to ~/Downloads.
 
 ```sh
 cd app && npm install && npx tauri dev     # or: npx tauri build
 ```
 
-Accounts are stored in `~/Library/Application Support/rustyclaude/accounts.toml`.
+Accounts are stored in `~/Library/Application Support/rustyclaude/accounts.toml` (macOS) or
+`~/.config/rustyclaude/accounts.toml` (Linux).
+
+### Linux
+
+```sh
+sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev build-essential libssl-dev
+```
+
+Then `deploy/install-linux-app.sh` builds and installs the app, pins it to the KDE Plasma or
+GNOME dock, and sets up Ctrl+Alt+C through the desktop (key grabs don't work on Wayland).
+
+Shortcuts use Ctrl instead of ⌘. Closing the window hides it; use the tray icon to bring it
+back or quit. Each account's sign-in lives in `~/.local/share/dev.rustyclaude.app/accounts/<id>`.
 
 ## Host sessions (the daemon)
 

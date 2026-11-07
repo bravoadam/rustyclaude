@@ -15,6 +15,7 @@ pub struct Account {
 }
 
 impl Account {
+    #[cfg(target_os = "macos")]
     pub fn store_id(&self) -> [u8; 16] {
         let mut out = [0u8; 16];
         for (i, b) in out.iter_mut().enumerate() {
