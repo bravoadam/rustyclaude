@@ -32,13 +32,25 @@ function flash(msg, ok = false) {
 
 // ---- rendering --------------------------------------------------------------
 
+// Elements that are re-rendered often get an `html` property that skips identical HTML.
+for (const sel of ['#accounts', '#acct-list', '#switches', '#hosts']) {
+  Object.defineProperty($(sel), 'html', {
+    set(v) {
+      if (this.__html !== v) {
+        this.innerHTML = v;
+        this.__html = v;
+      }
+    },
+  });
+}
+
 function render() {
   const { accounts, active, panel } = state;
   document.body.classList.toggle('wide', !!panel);
   $('#panel-accounts').hidden = panel !== 'accounts';
   $('#panel-sessions').hidden = panel !== 'sessions';
 
-  $('#accounts').innerHTML = accounts.map((a, i) => `
+  $('#accounts').html = accounts.map((a, i) => `
     <button class="acct ${a.id === active && !panel ? 'active' : ''}" data-id="${esc(a.id)}"
       title="${esc(a.name)}${i < 9 ? `  ${MOD}${i + 1}` : ''}" style="--c:${esc(a.color)}">
       <span class="avatar">${esc(initials(a.name))}</span>
@@ -51,13 +63,13 @@ function render() {
   $('#sessions-btn').classList.toggle('on', panel === 'sessions');
   $('#gear').classList.toggle('on', panel === 'accounts');
 
-  renderAccountsPanel();
-  renderSessionsPanel();
+  if (panel === 'accounts') renderAccountsPanel();
+  if (panel === 'sessions') renderSessionsPanel();
 }
 
 function renderAccountsPanel() {
   const { accounts } = state;
-  $('#acct-list').innerHTML = accounts.length ? accounts.map((a, i) => `
+  $('#acct-list').html = accounts.length ? accounts.map((a, i) => `
     <li data-id="${esc(a.id)}">
       <span class="avatar sm" style="--c:${esc(a.color)}">${esc(initials(a.name))}</span>
       <input class="rename" value="${esc(a.name)}" data-id="${esc(a.id)}" />
@@ -81,7 +93,7 @@ function ago(ts) {
 const newFormOpen = new Set();
 
 function renderSessionsPanel() {
-  $('#switches').innerHTML = [...switches.values()].map((w) => `
+  $('#switches').html = [...switches.values()].map((w) => `
     <div class="switch" data-key="${esc(key(w.host, w.session))}">
       <div class="switch-text">
         <b>${esc(w.sessionName)}</b> → <b>${esc(w.accountName)}</b>:
@@ -94,7 +106,7 @@ function renderSessionsPanel() {
       <button class="mini" data-cancel-switch>Cancel</button>
     </div>`).join('');
 
-  $('#hosts').innerHTML = hostOrder.length ? hostOrder.map((name) => {
+  $('#hosts').html = hostOrder.length ? hostOrder.map((name) => {
     const h = hosts[name];
     const sessions = h.sessions.filter((s) => s.mode === 'terminal' || !s.mode).map((s) => {
       const acct = accountByName(s.account);

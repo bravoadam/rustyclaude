@@ -17,6 +17,7 @@
   },
   "permissions": [
     "allow-webauthn",
-    "allow-webauthn-cancel"
+    "allow-webauthn-cancel",
+    "allow-browser-signin"
   ]
 }

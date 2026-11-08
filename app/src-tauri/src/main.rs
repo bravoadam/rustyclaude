@@ -13,6 +13,8 @@ mod conn;
 mod gtk_layout;
 #[cfg(target_os = "linux")]
 mod webauthn;
+#[cfg(target_os = "linux")]
+mod browser_signin;
 mod hosts;
 
 use std::{
@@ -38,13 +40,22 @@ use tauri_plugin_window_state::{StateFlags, WindowExt};
 
 const SIDEBAR_WIDTH: f64 = 72.0;
 /// Draggable strip above the account view (the native title bar is hidden).
+#[cfg(not(target_os = "linux"))]
 const TITLEBAR_HEIGHT: f64 = 32.0;
+/// Linux keeps the native title bar, so there's no strip (and no extra webview) above the page.
+#[cfg(target_os = "linux")]
+const TITLEBAR_HEIGHT: f64 = 0.0;
 const TITLEBAR: &str = "titlebar";
 const MAIN: &str = "main";
 pub const SIDEBAR: &str = "sidebar";
 const TOGGLE_HOTKEY: &str = "ctrl+alt+c";
 /// Safari's UA: some sign-in providers refuse "embedded browser" user agents.
+#[cfg(not(target_os = "linux"))]
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
+/// On Linux, Safari-on-Linux (like GNOME Web): claiming a Mac while the engine reports
+/// Linux (navigator.platform etc.) fails bot checks such as claude.ai's email sign-in.
+#[cfg(target_os = "linux")]
+const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
 /// Popups to these hosts stay in-app (sign-in flows); everything else opens in the default browser.
 const IN_APP_HOSTS: &[&str] = &[
     "claude.ai",
@@ -74,6 +85,12 @@ struct AppState {
     pending_oauth: HashMap<String, PendingOauth>,
     /// The (id, name) pairs the current menu was built from.
     menu_accounts: Option<Vec<(String, String)>>,
+    /// The account shown before the active one; kept rendered for a quick switch back.
+    previous: Option<String>,
+    /// Accounts whose page isn't loaded (staggered at startup, or parked); loaded on select.
+    unloaded: HashSet<String>,
+    /// When each account was last moved to the background.
+    left_at: HashMap<String, std::time::Instant>,
 }
 
 impl AppState {
@@ -153,6 +170,17 @@ fn refresh(app: &AppHandle) {
             let _ = app.set_menu(menu);
         }
     }
+    #[cfg(target_os = "linux")]
+    if let Some(win) = app.get_window(MAIN) {
+        let name = v.accounts.iter().find(|a| Some(&a.id) == v.active.as_ref()).map(|a| a.name.as_str());
+        let title = match (name, v.panel.is_some()) {
+            (Some(n), false) => format!("{n} · RustyClaude"),
+            _ => "RustyClaude".to_string(),
+        };
+        if win.title().ok().as_deref() != Some(title.as_str()) {
+            let _ = win.set_title(&title);
+        }
+    }
     let _ = app.emit_to(TITLEBAR, "state", v.clone());
     let _ = app.emit_to(SIDEBAR, "state", v);
 }
@@ -188,22 +216,33 @@ fn layout(app: &AppHandle) {
     let content_h = (size.height - TITLEBAR_HEIGHT).max(1.0);
     if let Some(tb) = app.get_webview(TITLEBAR) {
         place(&tb, SIDEBAR_WIDTH, 0.0, content_w, TITLEBAR_HEIGHT);
-        if st.wide() {
-            let _ = tb.hide();
-        } else {
-            let _ = tb.show();
-        }
+        set_visible(&tb, !st.wide());
     }
     for a in &st.cfg.accounts {
         if let Some(wv) = app.get_webview(&a.label()) {
-            place(&wv, SIDEBAR_WIDTH, TITLEBAR_HEIGHT, content_w, content_h);
-            if !st.wide() && st.active.as_deref() == Some(a.id.as_str()) {
-                let _ = wv.show();
-            } else {
-                let _ = wv.hide();
-            }
+            let active = !st.wide() && st.active.as_deref() == Some(a.id.as_str());
+            // Hidden pages are throttled and may drop what they drew, so showing them again
+            // means a full repaint. On Linux the previous account stays rendered just past
+            // the window's right edge instead, which makes switching back instant.
+            let keep = cfg!(target_os = "linux") && !active && st.previous.as_deref() == Some(a.id.as_str());
+            let x = if keep { size.width + 64.0 } else { SIDEBAR_WIDTH };
+            place(&wv, x, TITLEBAR_HEIGHT, content_w, content_h);
+            set_visible(&wv, active || keep);
         }
     }
+}
+
+/// Shows or hides a webview only when that actually changes; each call costs a trip
+/// through the toolkit even when it's a no-op.
+fn set_visible(wv: &tauri::Webview, visible: bool) {
+    static SHOWN: Mutex<Option<HashMap<String, bool>>> = Mutex::new(None);
+    let mut shown = SHOWN.lock().unwrap();
+    let shown = shown.get_or_insert_with(HashMap::new);
+    if shown.get(wv.label()) == Some(&visible) {
+        return;
+    }
+    shown.insert(wv.label().to_string(), visible);
+    let _ = if visible { wv.show() } else { wv.hide() };
 }
 
 fn host_allowed_in_app(url: &Url) -> bool {
@@ -231,7 +270,9 @@ fn create_account_webview(app: &AppHandle, start_url: &str, acct: &Account) -> t
     #[cfg(not(target_os = "macos"))]
     let builder = builder.data_directory(app.path().app_data_dir()?.join("accounts").join(&acct.id));
     #[cfg(target_os = "linux")]
-    let builder = builder.initialization_script(include_str!("webauthn.js"));
+    let builder = builder
+        .initialization_script(include_str!("webauthn.js"))
+        .initialization_script(include_str!("signin.js"));
     let builder = builder
         .user_agent(USER_AGENT)
         .initialization_script(include_str!("inject.js"))
@@ -343,22 +384,92 @@ fn active_webview(app: &AppHandle) -> Option<tauri::Webview> {
 }
 
 fn select(app: &AppHandle, id: &str) {
+    let started = std::time::Instant::now();
     {
         let st = app.state::<Shared>();
         let mut st = st.lock().unwrap();
         if !st.cfg.accounts.iter().any(|a| a.id == id) {
             return;
         }
+        if let Some(old) = st.active.clone().filter(|old| old != id) {
+            st.left_at.insert(old.clone(), std::time::Instant::now());
+            st.previous = Some(old);
+        }
         st.active = Some(id.to_string());
         st.panel = None;
+        if st.unloaded.remove(id) {
+            let start = st.cfg.start_url.clone();
+            if let (Some(wv), Ok(u)) = (app.get_webview(&format!("acct-{id}")), start.parse::<Url>()) {
+                let _ = wv.navigate(u);
+            }
+        }
         st.attention.remove(id);
         st.cfg.last_active = Some(id.to_string());
-        let _ = config::save(&st.cfg);
     }
+    save_soon(app);
     refresh(app);
     if let Some(wv) = active_webview(app) {
         let _ = wv.set_focus();
     }
+    if std::env::var_os("RUSTYCLAUDE_TIMING").is_some() {
+        eprintln!("switch: {:.2} ms", started.elapsed().as_secs_f64() * 1000.0);
+    }
+}
+
+fn load_if_unloaded(app: &AppHandle, id: &str) {
+    let start = {
+        let st = app.state::<Shared>();
+        let mut st = st.lock().unwrap();
+        if !st.unloaded.remove(id) {
+            return;
+        }
+        st.cfg.start_url.clone()
+    };
+    if let (Some(wv), Ok(u)) = (app.get_webview(&format!("acct-{id}")), start.parse::<Url>()) {
+        let _ = wv.navigate(u);
+    }
+}
+
+/// claude.ai's sign-in page keeps a CPU core busy. An account left on it in the background
+/// for a while is unloaded until it's selected again (no notifications to miss there).
+fn park_idle_logins(app: &AppHandle) {
+    const IDLE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+    let candidates: Vec<String> = {
+        let st = app.state::<Shared>();
+        let st = st.lock().unwrap();
+        st.cfg
+            .accounts
+            .iter()
+            .map(|a| a.id.clone())
+            .filter(|id| {
+                st.active.as_ref() != Some(id)
+                    && !st.unloaded.contains(id)
+                    && !st.pending_oauth.contains_key(id)
+                    && st.left_at.get(id).is_none_or(|t| t.elapsed() > IDLE)
+            })
+            .collect()
+    };
+    for id in candidates {
+        let Some(wv) = app.get_webview(&format!("acct-{id}")) else { continue };
+        let on_login = wv.url().is_ok_and(|u| u.host_str() == Some("claude.ai") && u.path().starts_with("/login"));
+        if on_login && wv.navigate("about:blank".parse().unwrap()).is_ok() {
+            app.state::<Shared>().lock().unwrap().unloaded.insert(id);
+        }
+    }
+}
+
+/// Writes accounts.toml in the background, so switching never waits on the disk. Saves
+/// are serialized and always write the latest state, so a quick burst ends correctly.
+fn save_soon(app: &AppHandle) {
+    static SAVING: Mutex<()> = Mutex::new(());
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let _guard = SAVING.lock().unwrap();
+        let cfg = app.state::<Shared>().lock().unwrap().cfg.clone();
+        if let Err(e) = config::save(&cfg) {
+            eprintln!("could not save accounts: {e:#}");
+        }
+    });
 }
 
 fn cycle(app: &AppHandle, step: isize) {
@@ -515,6 +626,11 @@ fn remove_account(app: AppHandle, id: String) -> Result<(), String> {
         let mut st = st.lock().unwrap();
         st.cfg.accounts.retain(|a| a.id != id);
         st.attention.remove(&id);
+        st.unloaded.remove(&id);
+        st.left_at.remove(&id);
+        if st.previous.as_deref() == Some(id.as_str()) {
+            st.previous = None;
+        }
         if st.active.as_deref() == Some(id.as_str()) {
             st.active = st.cfg.accounts.first().map(|a| a.id.clone());
         }
@@ -585,11 +701,13 @@ fn begin_oauth(app: AppHandle, account: String, host: String, session: String, u
     let parsed: Url = url.parse().map_err(|_| "bad sign-in URL".to_string())?;
     let redirect = parsed.query_pairs().find(|(k, _)| k == "redirect_uri").map(|(_, v)| v.into_owned());
     let wv = app.get_webview(&format!("acct-{account}")).ok_or("no such account tab")?;
-    app.state::<Shared>()
-        .lock()
-        .unwrap()
-        .pending_oauth
-        .insert(account.clone(), PendingOauth { host, session, redirect });
+    {
+        let st = app.state::<Shared>();
+        let mut st = st.lock().unwrap();
+        st.pending_oauth.insert(account.clone(), PendingOauth { host, session, redirect });
+        // We're about to load the sign-in page here; selecting must not replace it.
+        st.unloaded.remove(&account);
+    }
     wv.navigate(parsed).map_err(|e| e.to_string())?;
     select(&app, &account);
     Ok(())
@@ -691,6 +809,48 @@ async fn webauthn(webview: tauri::Webview, req: serde_json::Value) -> Result<ser
     }
 }
 
+/// Email/Apple sign-in through Brave or Chromium (Linux): claude.ai's bot check rejects
+/// WebKitGTK. Copies the resulting claude.ai cookies into this account and reloads it.
+#[cfg(target_os = "linux")]
+#[tauri::command]
+async fn browser_signin(app: AppHandle, webview: tauri::Webview) -> Result<(), String> {
+    let root = app.path().app_cache_dir().map_err(|e| e.to_string())?;
+    let cookies = tauri::async_runtime::spawn_blocking(move || browser_signin::run(&root))
+        .await
+        .map_err(|e| e.to_string())??;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let wv = webview.clone();
+    app.run_on_main_thread(move || {
+        use tauri::webview::{cookie::time::OffsetDateTime, Cookie};
+        let mut r = Ok(());
+        for c in cookies {
+            let mut b = Cookie::build((c.name, c.value))
+                .domain(c.domain)
+                .path(c.path)
+                .secure(c.secure)
+                .http_only(c.http_only);
+            if let Some(t) = c.expires.and_then(|e| OffsetDateTime::from_unix_timestamp(e).ok()) {
+                b = b.expires(t);
+            }
+            if let Err(e) = wv.set_cookie(b.build()) {
+                r = Err(e.to_string());
+            }
+        }
+        let _ = tx.send(r);
+    })
+    .map_err(|e| e.to_string())?;
+    rx.recv().map_err(|e| e.to_string())??;
+    webview.navigate("https://claude.ai/new".parse().unwrap()).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+#[tauri::command]
+fn browser_signin() -> Result<(), String> {
+    Err("only needed on Linux".into())
+}
+
+
 #[tauri::command]
 fn webauthn_cancel() {
     #[cfg(target_os = "linux")]
@@ -768,13 +928,42 @@ fn main() {
                 LogicalPosition::new(0.0, 0.0),
                 LogicalSize::new(SIDEBAR_WIDTH, size.height),
             )?;
+            #[cfg(not(target_os = "linux"))]
             win.add_child(
                 WebviewBuilder::new(TITLEBAR, WebviewUrl::App("index.html#titlebar".into())),
                 LogicalPosition::new(SIDEBAR_WIDTH, 0.0),
                 LogicalSize::new((size.width - SIDEBAR_WIDTH).max(1.0), TITLEBAR_HEIGHT),
             )?;
+            // The active account loads now; the others a few seconds apart, so the first
+            // one isn't competing with all of them. Selecting one loads it at once.
+            let first = app.state::<Shared>().lock().unwrap().active.clone();
+            let mut later = vec![];
             for a in &cfg.accounts {
-                create_account_webview(app.handle(), &cfg.start_url, a)?;
+                if Some(&a.id) == first.as_ref() {
+                    create_account_webview(app.handle(), &cfg.start_url, a)?;
+                } else {
+                    create_account_webview(app.handle(), "about:blank", a)?;
+                    later.push(a.id.clone());
+                }
+            }
+            app.state::<Shared>().lock().unwrap().unloaded.extend(later.iter().cloned());
+            {
+                let h = app.handle().clone();
+                std::thread::spawn(move || {
+                    for (i, id) in later.into_iter().enumerate() {
+                        std::thread::sleep(std::time::Duration::from_secs(if i == 0 { 4 } else { 2 }));
+                        let h2 = h.clone();
+                        let _ = h.run_on_main_thread(move || load_if_unloaded(&h2, &id));
+                    }
+                });
+            }
+            {
+                let h = app.handle().clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(std::time::Duration::from_secs(60));
+                    let h2 = h.clone();
+                    let _ = h.run_on_main_thread(move || park_idle_logins(&h2));
+                });
             }
 
             let (host_cfgs, hosts_err) = match hosts::load() {
@@ -790,6 +979,11 @@ fn main() {
             win.on_window_event(move |ev| match ev {
                 WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => layout(&handle),
                 WindowEvent::Focused(true) => clear_active_attention(&handle),
+                // On Linux, closing quits: docks like Dash-to-Dock implement "Quit" by
+                // closing the window, so the two can't be told apart.
+                #[cfg(target_os = "linux")]
+                WindowEvent::CloseRequested { .. } => handle.exit(0),
+                #[cfg(not(target_os = "linux"))]
                 WindowEvent::CloseRequested { api, .. } => {
                     // Keep running (and notifying) in the background, like the official app.
                     api.prevent_close();
@@ -883,6 +1077,7 @@ fn main() {
             web_notify,
             webauthn,
             webauthn_cancel,
+            browser_signin,
         ])
         .build(tauri::generate_context!())
         .expect("error while building RustyClaude")

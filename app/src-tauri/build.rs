@@ -19,6 +19,7 @@ fn main() {
         "web_notify",
         "webauthn",
         "webauthn_cancel",
+        "browser_signin",
     ])))
     .expect("failed to run tauri-build");
 }

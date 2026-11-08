@@ -51,6 +51,17 @@ pub fn area() -> Option<(f64, f64)> {
 }
 
 pub fn place(wv: &tauri::Webview, x: f64, y: f64, w: f64, h: f64) {
+    // Skip webviews already at this spot and size (most of them, on an account switch).
+    static PLACED: Mutex<Option<HashMap<String, (i64, i64, i64, i64)>>> = Mutex::new(None);
+    let geo = (x as i64, y as i64, w as i64, h as i64);
+    {
+        let mut placed = PLACED.lock().unwrap();
+        let placed = placed.get_or_insert_with(HashMap::new);
+        if placed.get(wv.label()) == Some(&geo) {
+            return;
+        }
+        placed.insert(wv.label().to_string(), geo);
+    }
     let _ = wv.with_webview(move |platform| {
         let widget = platform.inner().upcast::<gtk::Widget>();
         LAYOUT.with(|l| {

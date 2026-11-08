@@ -63,10 +63,24 @@ RestartSec=5
 WantedBy=default.target
 UNITFILE
 
+# Linger keeps this user's services running without a login, and starts the user's
+# systemd instance now. Do it first: shells from `su`/`sudo -u` have no user bus otherwise.
+loginctl enable-linger "$USER" 2>/dev/null || sudo loginctl enable-linger "$USER"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] || ! systemctl --user show-environment >/dev/null 2>&1; then
+  export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+  for _ in $(seq 20); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 0.5; done
+fi
+if ! systemctl --user show-environment >/dev/null 2>&1; then
+  echo "Can't reach $USER's systemd user instance. Log in as $USER directly (SSH or desktop),"
+  echo "not with su, and rerun this script. Or use:  sudo machinectl shell $USER@ $PWD/deploy/install-daemon.sh"
+  exit 1
+fi
+
 systemctl --user daemon-reload
 systemctl --user enable rustyclaude >/dev/null
 systemctl --user restart rustyclaude
-loginctl enable-linger "$USER" 2>/dev/null || sudo loginctl enable-linger "$USER"
 
 # Make sure it actually came up (e.g. the port isn't held by someone else's daemon).
 sleep 2
@@ -83,8 +97,10 @@ cat <<DONE
 
 Daemon for $USER running on ws://$BIND_IP:$PORT (starts at boot).
 
-Paste the block between the lines into ~/Library/Application Support/rustyclaude/hosts.toml
-on your Mac (as its own entry, keep the others), then restart RustyClaude.
+Paste the block between the lines into RustyClaude's hosts.toml (as its own entry,
+keep the others), then restart RustyClaude:
+  macOS:  ~/Library/Application Support/rustyclaude/hosts.toml
+  Linux:  ~/.config/rustyclaude/hosts.toml
 ------------------------------------------------------------------------
 [[host]]
 name = "$(hostname)-$USER"
