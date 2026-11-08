@@ -17,6 +17,8 @@ fn main() {
         "get_autostart",
         "set_autostart",
         "web_notify",
+        "webauthn",
+        "webauthn_cancel",
     ])))
     .expect("failed to run tauri-build");
 }

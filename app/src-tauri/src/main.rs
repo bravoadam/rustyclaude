@@ -11,6 +11,8 @@ mod config;
 mod conn;
 #[cfg(target_os = "linux")]
 mod gtk_layout;
+#[cfg(target_os = "linux")]
+mod webauthn;
 mod hosts;
 
 use std::{
@@ -228,6 +230,8 @@ fn create_account_webview(app: &AppHandle, start_url: &str, acct: &Account) -> t
     let builder = builder.data_store_identifier(acct.store_id());
     #[cfg(not(target_os = "macos"))]
     let builder = builder.data_directory(app.path().app_data_dir()?.join("accounts").join(&acct.id));
+    #[cfg(target_os = "linux")]
+    let builder = builder.initialization_script(include_str!("webauthn.js"));
     let builder = builder
         .user_agent(USER_AGENT)
         .initialization_script(include_str!("inject.js"))
@@ -371,8 +375,23 @@ fn cycle(app: &AppHandle, step: isize) {
     select(app, &next);
 }
 
+/// Puts the window away while the app keeps running. On Linux it's minimized, not hidden:
+/// with no window the dock thinks the app is closed, so a click starts a new process that
+/// hands over and exits, and the dock spins until its startup timeout.
+fn stash_main(win: &tauri::Window) {
+    #[cfg(target_os = "linux")]
+    let _ = win.minimize();
+    #[cfg(not(target_os = "linux"))]
+    let _ = win.hide();
+}
+
 fn show_main(app: &AppHandle) {
     if let Some(win) = app.get_window(MAIN) {
+        // Wayland has no "unminimize" request, but remapping the window restores it.
+        #[cfg(target_os = "linux")]
+        if !win.is_focused().unwrap_or(false) {
+            let _ = win.hide();
+        }
         let _ = win.show();
         let _ = win.unminimize();
         let _ = win.set_focus();
@@ -384,7 +403,7 @@ fn toggle_main(app: &AppHandle) {
     if let Some(win) = app.get_window(MAIN) {
         let up = win.is_visible().unwrap_or(false) && win.is_focused().unwrap_or(false);
         if up {
-            let _ = win.hide();
+            stash_main(&win);
         } else {
             show_main(app);
         }
@@ -648,13 +667,43 @@ fn web_notify(app: AppHandle, webview: tauri::Webview, title: String, body: Stri
     refresh(&app);
 }
 
+/// Security-key requests from webauthn.js (Linux). The origin comes from the webview's URL.
+#[tauri::command]
+async fn webauthn(webview: tauri::Webview, req: serde_json::Value) -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let url = webview.url().map_err(|e| e.to_string())?;
+        let what = format!("{} {} rp={} appid={} allow={}", webview.label(), url.host_str().unwrap_or("?"),
+            req["options"]["rpId"].as_str().or(req["options"]["rp"]["id"].as_str()).unwrap_or("-"),
+            req["options"]["extensions"]["appid"].as_str().unwrap_or("-"),
+            req["options"]["allowCredentials"].as_array().map_or(0, |a| a.len()));
+        let req: webauthn::Request = serde_json::from_value(req).map_err(|e| format!("TypeError: {e}"))?;
+        let r = tauri::async_runtime::spawn_blocking(move || webauthn::handle(url, req))
+            .await
+            .map_err(|e| e.to_string())?;
+        eprintln!("webauthn {what}: {}", r.as_ref().map(|_| "ok".to_string()).unwrap_or_else(|e| e.clone()));
+        return r;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (webview, req);
+        Err("NotSupportedError: not available on this platform".into())
+    }
+}
+
+#[tauri::command]
+fn webauthn_cancel() {
+    #[cfg(target_os = "linux")]
+    webauthn::cancel();
+}
+
 // ---- app ---------------------------------------------------------------------
 
 fn main() {
-    // Becomes the Wayland app id, so the window matches RustyClaude.desktop: one dock icon,
-    // and the badge, which Tauri sends for "<productName>.desktop".
+    // GTK uses this as the Wayland app id, so the window matches dev.rustyclaude.app.desktop
+    // (one dock icon). The same name is registered as the GTK app id via tauri.conf.
     #[cfg(target_os = "linux")]
-    gtk::glib::set_prgname(Some("RustyClaude"));
+    gtk::glib::set_prgname(Some("dev.rustyclaude.app"));
 
     tauri::Builder::default()
         // Must be first. A dock click on a hidden window starts a second process, which
@@ -745,7 +794,7 @@ fn main() {
                     // Keep running (and notifying) in the background, like the official app.
                     api.prevent_close();
                     if let Some(w) = handle.get_window(MAIN) {
-                        let _ = w.hide();
+                        stash_main(&w);
                     }
                 }
                 _ => {}
@@ -753,6 +802,8 @@ fn main() {
 
             #[cfg(not(target_os = "macos"))]
             build_tray(app.handle())?;
+            #[cfg(target_os = "linux")]
+            gtk_layout::add_quit_action(app.handle(), &win);
 
             if can_grab_hotkey() {
                 if let Err(e) = app.global_shortcut().register(TOGGLE_HOTKEY) {
@@ -830,6 +881,8 @@ fn main() {
             get_autostart,
             set_autostart,
             web_notify,
+            webauthn,
+            webauthn_cancel,
         ])
         .build(tauri::generate_context!())
         .expect("error while building RustyClaude")

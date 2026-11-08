@@ -11,12 +11,21 @@ npx tauri build --no-bundle
 
 data="${XDG_DATA_HOME:-$HOME/.local/share}"
 bin="$HOME/.local/bin/rustyclaude"
-desktop="RustyClaude.desktop"   # must match the Wayland app id set in main.rs
+desktop="dev.rustyclaude.app.desktop"   # must match the Wayland app id (tauri.conf identifier)
 
 mkdir -p "$(dirname "$bin")" "$data/applications" "$data/icons/hicolor/256x256/apps" "$data/kglobalaccel"
 # Replace rather than overwrite, so this works while the app is running.
 install -m755 ../target/release/rustyclaude-app "$bin.new" && mv -f "$bin.new" "$bin"
 install -m644 src-tauri/icons/128x128@2x.png "$data/icons/hicolor/256x256/apps/rustyclaude.png"
+
+# Earlier versions used RustyClaude.desktop.
+old=RustyClaude.desktop
+rm -f "$data/applications/$old" "$data/kglobalaccel/$old"
+rc="${XDG_CONFIG_HOME:-$HOME/.config}/plasma-org.kde.plasma.desktop-appletsrc"
+[ -e "$rc" ] && sed -i "s|applications:$old|applications:$desktop|g" "$rc"
+if command -v gsettings >/dev/null && gsettings list-schemas 2>/dev/null | grep -qx org.gnome.shell; then
+  gsettings set org.gnome.shell favorite-apps "$(gsettings get org.gnome.shell favorite-apps | sed "s/'$old'/'$desktop'/")"
+fi
 
 cat > "$data/applications/$desktop" <<EOF
 [Desktop Entry]
@@ -24,11 +33,11 @@ Type=Application
 Name=RustyClaude
 Comment=Several Claude accounts in one window
 Exec=$bin
-Icon=rustyclaude
+Icon=$data/icons/hicolor/256x256/apps/rustyclaude.png
 Terminal=false
 Categories=Network;Development;
-StartupWMClass=RustyClaude
-StartupNotify=true
+StartupWMClass=dev.rustyclaude.app
+StartupNotify=false
 SingleMainWindow=true
 Actions=Toggle;
 
@@ -41,6 +50,7 @@ EOF
 ln -sf "$data/applications/$desktop" "$data/kglobalaccel/$desktop"
 update-desktop-database "$data/applications" 2>/dev/null || true
 kbuildsycoca6 2>/dev/null || true
+gtk-update-icon-cache -q -t -f "$data/icons/hicolor" 2>/dev/null || true
 
 # KDE Plasma dock. If Plasma isn't running, edit its config for the next login instead.
 rc="${XDG_CONFIG_HOME:-$HOME/.config}/plasma-org.kde.plasma.desktop-appletsrc"

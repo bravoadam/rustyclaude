@@ -78,6 +78,7 @@ pub fn popup(app: &AppHandle, features: NewWindowFeatures, user_agent: &str) -> 
         .title("Sign in")
         .inner_size(520.0, 720.0)
         .user_agent(user_agent)
+        .initialization_script(include_str!("webauthn.js"))
         .window_features(features)
         .build();
     match built {
@@ -105,6 +106,17 @@ pub fn set_badge(count: i64) {
     let Ok(bus) = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) else { return };
     let props: HashMap<String, Variant> =
         HashMap::from([("count".into(), count.to_variant()), ("count-visible".into(), (count > 0).to_variant())]);
-    let body = ("application://RustyClaude.desktop", props).to_variant();
+    let body = ("application://dev.rustyclaude.app.desktop", props).to_variant();
     let _ = bus.emit_signal(None, "/dev/rustyclaude/app", "com.canonical.Unity.LauncherEntry", "Update", Some(&body));
+}
+
+/// The dock's "Quit" calls the app's exported `quit` action when there is one; otherwise it
+/// just closes the window, which only minimizes this app. Needs enableGTKAppId (tauri.conf),
+/// which also makes the Wayland app id, and so the .desktop name, dev.rustyclaude.app.
+pub fn add_quit_action(app: &AppHandle, win: &Window) {
+    let Some(gtk_app) = win.gtk_window().ok().and_then(|w| w.application()) else { return };
+    let quit = gio::SimpleAction::new("quit", None);
+    let app = app.clone();
+    quit.connect_activate(move |_, _| app.exit(0));
+    gtk_app.add_action(&quit);
 }

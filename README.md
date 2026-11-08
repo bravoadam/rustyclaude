@@ -35,8 +35,9 @@ sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
 Then `deploy/install-linux-app.sh` builds and installs the app, pins it to the KDE Plasma or
 GNOME dock, and sets up Ctrl+Alt+C through the desktop (key grabs don't work on Wayland).
 
-Shortcuts use Ctrl instead of ⌘. Closing the window hides it; use the tray icon to bring it
-back or quit. Each account's sign-in lives in `~/.local/share/dev.rustyclaude.app/accounts/<id>`.
+Shortcuts use Ctrl instead of ⌘. Closing the window minimizes it; click the dock icon to bring it
+back, and use the tray icon to quit. Security keys (YubiKey etc.) work on the Claude and Google sign-in pages through the app's own
+WebAuthn bridge (`src/webauthn.rs`), since WebKitGTK has none. Each account's sign-in lives in `~/.local/share/dev.rustyclaude.app/accounts/<id>`.
 
 ## Host sessions (the daemon)
 

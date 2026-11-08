@@ -1,0 +1,22 @@
+{
+  "identifier": "webauthn",
+  "description": "Security keys for sign-in pages (Linux, where WebKitGTK has no WebAuthn). The app takes the origin from the webview itself, so a page can only sign for its own site.",
+  "platforms": [
+    "linux"
+  ],
+  "webviews": [
+    "acct-*",
+    "popup-*"
+  ],
+  "remote": {
+    "urls": [
+      "https://claude.ai/*",
+      "https://*.claude.ai/*",
+      "https://accounts.google.com/*"
+    ]
+  },
+  "permissions": [
+    "allow-webauthn",
+    "allow-webauthn-cancel"
+  ]
+}
