@@ -2,7 +2,7 @@
 # Installs rustyclaude-daemon as a systemd user service for the current user.
 #
 # Usage: ./deploy/install-daemon.sh [bind-ip] [port]
-#   bind-ip  default: this machine's LAN IP
+#   bind-ip  default: asks, offering this machine's addresses (LAN, Tailscale, ...)
 #   port     default: the port this user used before, else the first free one from 7878
 #
 # Several users on one machine each get their own daemon, port and token.
@@ -21,7 +21,40 @@ UNIT_DIR="$HOME/.config/systemd/user"
 UNIT="$UNIT_DIR/rustyclaude.service"
 mkdir -p "$CONF_DIR" "$UNIT_DIR"
 
-BIND_IP="${1:-$(hostname -I | awk '{print $1}')}"
+# Bind address: argument, else ask (default: the first LAN address).
+choose_ip() {
+  local ips=() labels=() ip name i choice
+  while read -r name ip; do
+    ip="${ip%/*}"
+    case "$ip" in 127.*|169.254.*) continue ;; esac
+    ips+=("$ip")
+    case "$name" in
+      tailscale*) labels+=("Tailscale, reachable from your tailnet only") ;;
+      docker*|br-*|veth*|virbr*) labels+=("$name, containers/VMs only") ;;
+      *) labels+=("$name, local network") ;;
+    esac
+  done < <(ip -o -4 addr show up | awk '{print $2, $4}')
+  ips+=("0.0.0.0"); labels+=("all interfaces, including public ones")
+  echo "Which address should the daemon listen on?" >&2
+  for i in "${!ips[@]}"; do printf '  %d) %-15s  %s\n' "$((i + 1))" "${ips[$i]}" "${labels[$i]}" >&2; done
+  read -rp "Choice [1]: " choice </dev/tty
+  choice="${choice:-1}"
+  if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#ips[@]} )); then
+    echo "${ips[$((choice - 1))]}"
+  else
+    echo "$choice" # typed an address directly
+  fi
+}
+if [ -n "${1:-}" ]; then
+  BIND_IP="$1"
+elif [ -t 0 ] || [ -r /dev/tty ]; then
+  BIND_IP="$(choose_ip)"
+else
+  BIND_IP="$(hostname -I | awk '{print $1}')"
+fi
+# The address clients connect to (0.0.0.0 isn't one).
+URL_IP="$BIND_IP"; [ "$BIND_IP" = 0.0.0.0 ] && URL_IP="$(hostname -I | awk '{print $1}')"
+[[ "$BIND_IP" =~ ^[0-9]+(\.[0-9]+){3}$ ]] || { echo "Not an IPv4 address: $BIND_IP"; exit 1; }
 
 port_in_use() { [ -n "$(ss -ltnH "sport = :$1" 2>/dev/null)" ]; }
 
@@ -95,7 +128,7 @@ fi
 
 cat <<DONE
 
-Daemon for $USER running on ws://$BIND_IP:$PORT (starts at boot).
+Daemon for $USER running on ws://$URL_IP:$PORT (starts at boot).
 
 Paste the block between the lines into RustyClaude's hosts.toml (as its own entry,
 keep the others), then restart RustyClaude:
@@ -104,7 +137,7 @@ keep the others), then restart RustyClaude:
 ------------------------------------------------------------------------
 [[host]]
 name = "$(hostname)-$USER"
-url = "ws://$BIND_IP:$PORT"
+url = "ws://$URL_IP:$PORT"
 token = "$TOKEN"
 ------------------------------------------------------------------------
 
