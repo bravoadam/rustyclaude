@@ -11,11 +11,10 @@ mod config;
 mod conn;
 #[cfg(target_os = "linux")]
 mod gtk_layout;
-#[cfg(target_os = "linux")]
-mod webauthn;
-#[cfg(target_os = "linux")]
-mod browser_signin;
 mod hosts;
+mod media;
+#[cfg(target_os = "linux")]
+mod x11_focus;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -30,7 +29,7 @@ use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     webview::{DownloadEvent, NewWindowResponse, WebviewBuilder},
     window::WindowBuilder,
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Url, WebviewUrl, WindowEvent, Wry,
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Url, WebviewUrl, WindowEvent,
 };
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
@@ -49,13 +48,8 @@ const TITLEBAR: &str = "titlebar";
 const MAIN: &str = "main";
 pub const SIDEBAR: &str = "sidebar";
 const TOGGLE_HOTKEY: &str = "ctrl+alt+c";
-/// Safari's UA: some sign-in providers refuse "embedded browser" user agents.
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
-/// On Linux, Safari-on-Linux (like GNOME Web): claiming a Mac while the engine reports
-/// Linux (navigator.platform etc.) fails bot checks such as claude.ai's email sign-in.
-#[cfg(target_os = "linux")]
-const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
 /// Popups to these hosts stay in-app (sign-in flows); everything else opens in the default browser.
 const IN_APP_HOSTS: &[&str] = &[
     "claude.ai",
@@ -185,12 +179,6 @@ fn refresh(app: &AppHandle) {
     let _ = app.emit_to(SIDEBAR, "state", v);
 }
 
-#[cfg(target_os = "linux")]
-fn place(wv: &tauri::Webview, x: f64, y: f64, w: f64, h: f64) {
-    gtk_layout::place(wv, x, y, w, h);
-}
-
-#[cfg(not(target_os = "linux"))]
 fn place(wv: &tauri::Webview, x: f64, y: f64, w: f64, h: f64) {
     let _ = wv.set_position(LogicalPosition::new(x, y));
     let _ = wv.set_size(LogicalSize::new(w, h));
@@ -201,9 +189,10 @@ fn layout(app: &AppHandle) {
     let (Ok(size), Ok(scale)) = (win.inner_size(), win.scale_factor()) else { return };
     #[allow(unused_mut)]
     let mut size = size.to_logical::<f64>(scale);
+    // The menu bar takes the top of the window; webviews are placed below it.
     #[cfg(target_os = "linux")]
-    if let Some((w, h)) = gtk_layout::area() {
-        size = LogicalSize::new(w, h);
+    if let Some(h) = gtk_layout::content_height() {
+        size.height = h;
     }
     let st = app.state::<Shared>();
     let st = st.lock().unwrap();
@@ -269,12 +258,11 @@ fn create_account_webview(app: &AppHandle, start_url: &str, acct: &Account) -> t
     let builder = builder.data_store_identifier(acct.store_id());
     #[cfg(not(target_os = "macos"))]
     let builder = builder.data_directory(app.path().app_data_dir()?.join("accounts").join(&acct.id));
-    #[cfg(target_os = "linux")]
+    // macOS: Safari's UA, as some sign-in providers refuse "embedded browser" ones.
+    // Linux runs Chromium, whose own UA is right.
+    #[cfg(target_os = "macos")]
+    let builder = builder.user_agent(USER_AGENT);
     let builder = builder
-        .initialization_script(include_str!("webauthn.js"))
-        .initialization_script(include_str!("signin.js"));
-    let builder = builder
-        .user_agent(USER_AGENT)
         .initialization_script(include_str!("inject.js"))
         .on_navigation(move |url| {
             oauth_capture(&app_for_nav, &acct_id, url);
@@ -282,9 +270,6 @@ fn create_account_webview(app: &AppHandle, start_url: &str, acct: &Account) -> t
         })
         .on_new_window(move |url, _features| {
             if host_allowed_in_app(&url) {
-                #[cfg(target_os = "linux")]
-                return gtk_layout::popup(&app_for_popups, _features, USER_AGENT);
-                #[cfg(not(target_os = "linux"))]
                 NewWindowResponse::Allow
             } else {
                 let _ = app_for_popups.opener().open_url(url.as_str(), None::<&str>);
@@ -316,15 +301,15 @@ fn create_account_webview(app: &AppHandle, start_url: &str, acct: &Account) -> t
 
     let size = win.inner_size()?.to_logical::<f64>(win.scale_factor()?);
     let wv = win.add_child(
-        builder,
-        LogicalPosition::new(SIDEBAR_WIDTH, TITLEBAR_HEIGHT),
-        LogicalSize::new((size.width - SIDEBAR_WIDTH).max(1.0), (size.height - TITLEBAR_HEIGHT).max(1.0)),
+        builder
+            .position(LogicalPosition::new(SIDEBAR_WIDTH, TITLEBAR_HEIGHT))
+            .size(LogicalSize::new((size.width - SIDEBAR_WIDTH).max(1.0), (size.height - TITLEBAR_HEIGHT).max(1.0))),
     )?;
     wv.hide()?;
     Ok(())
 }
 
-fn build_menu(app: &AppHandle, v: &StateView) -> tauri::Result<Menu<Wry>> {
+fn build_menu(app: &AppHandle, v: &StateView) -> tauri::Result<Menu<tauri::DynRuntime>> {
     // Default menu supplies App / Edit (copy, paste!) / Window menus.
     let menu = Menu::default(app)?;
 
@@ -378,6 +363,32 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Label of the webview the user last clicked or switched to, i.e. where typing should go.
+static KEY_TARGET: Mutex<Option<String>> = Mutex::new(None);
+
+/// Gives `wv` the keyboard and remembers it as where typing goes.
+fn focus_webview(wv: &tauri::Webview) {
+    *KEY_TARGET.lock().unwrap() = Some(wv.label().to_string());
+    #[cfg(target_os = "linux")]
+    x11_focus::focus(wv);
+    #[cfg(not(target_os = "linux"))]
+    let _ = wv.set_focus();
+}
+
+/// Where typing should go: the sidebar or title bar if that was clicked last and is
+/// showing, otherwise the account on screen.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn keyboard_target(app: &AppHandle) -> Option<tauri::Webview> {
+    if app.state::<Shared>().lock().unwrap().wide() {
+        return app.get_webview(SIDEBAR);
+    }
+    let last = KEY_TARGET.lock().unwrap().clone();
+    match last.as_deref() {
+        Some(l @ (SIDEBAR | TITLEBAR)) => app.get_webview(l),
+        _ => active_webview(app).or_else(|| app.get_webview(SIDEBAR)),
+    }
+}
+
 fn active_webview(app: &AppHandle) -> Option<tauri::Webview> {
     let id = app.state::<Shared>().lock().unwrap().active.clone()?;
     app.get_webview(&format!("acct-{id}"))
@@ -409,7 +420,7 @@ fn select(app: &AppHandle, id: &str) {
     save_soon(app);
     refresh(app);
     if let Some(wv) = active_webview(app) {
-        let _ = wv.set_focus();
+        focus_webview(&wv);
     }
     if std::env::var_os("RUSTYCLAUDE_TIMING").is_some() {
         eprintln!("switch: {:.2} ms", started.elapsed().as_secs_f64() * 1000.0);
@@ -647,6 +658,12 @@ fn remove_account(app: AppHandle, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn focus_self(webview: tauri::Webview) {
+    // CEF on Linux doesn't move keyboard focus between child browsers on click.
+    focus_webview(&webview);
+}
+
+#[tauri::command]
 fn set_panel(app: AppHandle, panel: Option<String>) {
     app.state::<Shared>().lock().unwrap().panel = panel;
     refresh(&app);
@@ -755,12 +772,12 @@ fn oauth_capture(app: &AppHandle, account: &str, url: &Url) {
 
 #[tauri::command]
 fn get_autostart(app: AppHandle) -> bool {
-    app.autolaunch().is_enabled().unwrap_or(false)
+    app.autostart().is_enabled().unwrap_or(false)
 }
 
 #[tauri::command]
 fn set_autostart(app: AppHandle, enabled: bool) -> Result<(), String> {
-    let al = app.autolaunch();
+    let al = app.autostart();
     if enabled { al.enable() } else { al.disable() }.map_err(|e| e.to_string())
 }
 
@@ -785,77 +802,6 @@ fn web_notify(app: AppHandle, webview: tauri::Webview, title: String, body: Stri
     refresh(&app);
 }
 
-/// Security-key requests from webauthn.js (Linux). The origin comes from the webview's URL.
-#[tauri::command]
-async fn webauthn(webview: tauri::Webview, req: serde_json::Value) -> Result<serde_json::Value, String> {
-    #[cfg(target_os = "linux")]
-    {
-        let url = webview.url().map_err(|e| e.to_string())?;
-        let what = format!("{} {} rp={} appid={} allow={}", webview.label(), url.host_str().unwrap_or("?"),
-            req["options"]["rpId"].as_str().or(req["options"]["rp"]["id"].as_str()).unwrap_or("-"),
-            req["options"]["extensions"]["appid"].as_str().unwrap_or("-"),
-            req["options"]["allowCredentials"].as_array().map_or(0, |a| a.len()));
-        let req: webauthn::Request = serde_json::from_value(req).map_err(|e| format!("TypeError: {e}"))?;
-        let r = tauri::async_runtime::spawn_blocking(move || webauthn::handle(url, req))
-            .await
-            .map_err(|e| e.to_string())?;
-        eprintln!("webauthn {what}: {}", r.as_ref().map(|_| "ok".to_string()).unwrap_or_else(|e| e.clone()));
-        return r;
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = (webview, req);
-        Err("NotSupportedError: not available on this platform".into())
-    }
-}
-
-/// Email/Apple sign-in through Brave or Chromium (Linux): claude.ai's bot check rejects
-/// WebKitGTK. Copies the resulting claude.ai cookies into this account and reloads it.
-#[cfg(target_os = "linux")]
-#[tauri::command]
-async fn browser_signin(app: AppHandle, webview: tauri::Webview) -> Result<(), String> {
-    let root = app.path().app_cache_dir().map_err(|e| e.to_string())?;
-    let cookies = tauri::async_runtime::spawn_blocking(move || browser_signin::run(&root))
-        .await
-        .map_err(|e| e.to_string())??;
-    let (tx, rx) = std::sync::mpsc::channel();
-    let wv = webview.clone();
-    app.run_on_main_thread(move || {
-        use tauri::webview::{cookie::time::OffsetDateTime, Cookie};
-        let mut r = Ok(());
-        for c in cookies {
-            let mut b = Cookie::build((c.name, c.value))
-                .domain(c.domain)
-                .path(c.path)
-                .secure(c.secure)
-                .http_only(c.http_only);
-            if let Some(t) = c.expires.and_then(|e| OffsetDateTime::from_unix_timestamp(e).ok()) {
-                b = b.expires(t);
-            }
-            if let Err(e) = wv.set_cookie(b.build()) {
-                r = Err(e.to_string());
-            }
-        }
-        let _ = tx.send(r);
-    })
-    .map_err(|e| e.to_string())?;
-    rx.recv().map_err(|e| e.to_string())??;
-    webview.navigate("https://claude.ai/new".parse().unwrap()).map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-#[tauri::command]
-fn browser_signin() -> Result<(), String> {
-    Err("only needed on Linux".into())
-}
-
-
-#[tauri::command]
-fn webauthn_cancel() {
-    #[cfg(target_os = "linux")]
-    webauthn::cancel();
-}
 
 // ---- app ---------------------------------------------------------------------
 
@@ -865,7 +811,14 @@ fn main() {
     #[cfg(target_os = "linux")]
     gtk::glib::set_prgname(Some("dev.rustyclaude.app"));
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Chromium (CEF) on Linux: WebKitGTK is challenged by Cloudflare (email sign-in, the
+    // session WebSockets) and is slower there. macOS keeps the system WebKit.
+    #[cfg(target_os = "linux")]
+    let builder = builder.runtime(tauri_runtime_cef::Cef::default());
+    #[cfg(target_os = "macos")]
+    let builder = builder.runtime(tauri_runtime_wry::Wry::default());
+    builder
         // Must be first. A dock click on a hidden window starts a second process, which
         // hands over to this one and exits; two would also fight over the same storage.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
@@ -877,7 +830,7 @@ fn main() {
         }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
+        .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 .with_state_flags(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED)
@@ -895,6 +848,7 @@ fn main() {
         )
         .manage(Shared::default())
         .setup(|app| {
+            media::clear(app.handle());
             let cfg = config::load().unwrap_or_else(|e| {
                 eprintln!("config error, starting empty: {e:#}");
                 Config::default()
@@ -919,20 +873,17 @@ fn main() {
             let win = builder.build()?;
             let _ = win.restore_state(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED);
 
-            #[cfg(target_os = "linux")]
-            gtk_layout::install(app.handle(), &win)?;
-
             let size = win.inner_size()?.to_logical::<f64>(win.scale_factor()?);
             win.add_child(
-                WebviewBuilder::new(SIDEBAR, WebviewUrl::App("index.html".into())),
-                LogicalPosition::new(0.0, 0.0),
-                LogicalSize::new(SIDEBAR_WIDTH, size.height),
+                WebviewBuilder::new(SIDEBAR, WebviewUrl::App("index.html".into()))
+                    .position(LogicalPosition::new(0.0, 0.0))
+                    .size(LogicalSize::new(SIDEBAR_WIDTH, size.height)),
             )?;
             #[cfg(not(target_os = "linux"))]
             win.add_child(
-                WebviewBuilder::new(TITLEBAR, WebviewUrl::App("index.html#titlebar".into())),
-                LogicalPosition::new(SIDEBAR_WIDTH, 0.0),
-                LogicalSize::new((size.width - SIDEBAR_WIDTH).max(1.0), TITLEBAR_HEIGHT),
+                WebviewBuilder::new(TITLEBAR, WebviewUrl::App("index.html#titlebar".into()))
+                    .position(LogicalPosition::new(SIDEBAR_WIDTH, 0.0))
+                    .size(LogicalSize::new((size.width - SIDEBAR_WIDTH).max(1.0), TITLEBAR_HEIGHT)),
             )?;
             // The active account loads now; the others a few seconds apart, so the first
             // one isn't competing with all of them. Selecting one loads it at once.
@@ -998,6 +949,8 @@ fn main() {
             build_tray(app.handle())?;
             #[cfg(target_os = "linux")]
             gtk_layout::add_quit_action(app.handle(), &win);
+            #[cfg(target_os = "linux")]
+            gtk_layout::watch_content_height(app.handle(), &win, layout);
 
             if can_grab_hotkey() {
                 if let Err(e) = app.global_shortcut().register(TOGGLE_HOTKEY) {
@@ -1007,7 +960,11 @@ fn main() {
 
             refresh(app.handle());
             if let Some(wv) = active_webview(app.handle()) {
-                let _ = wv.set_focus();
+                focus_webview(&wv);
+            }
+            #[cfg(target_os = "linux")]
+            if let Some(sb) = app.get_webview(SIDEBAR) {
+                x11_focus::install(app.handle(), &sb, keyboard_target);
             }
             Ok(())
         })
@@ -1075,9 +1032,12 @@ fn main() {
             get_autostart,
             set_autostart,
             web_notify,
-            webauthn,
-            webauthn_cancel,
-            browser_signin,
+            focus_self,
+            media::media_upload,
+            media::media_convert,
+            media::media_status,
+            media::media_read,
+            media::media_done,
         ])
         .build(tauri::generate_context!())
         .expect("error while building RustyClaude")

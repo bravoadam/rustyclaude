@@ -383,3 +383,6 @@ setInterval(render, 60_000);
   }
   render();
 })();
+
+// CEF on Linux: clicking a child browser doesn't give it keyboard focus by itself.
+window.addEventListener('pointerdown', () => { invoke('focus_self').catch(() => {}); }, true);

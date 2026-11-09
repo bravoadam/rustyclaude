@@ -15,6 +15,7 @@
     "allow-move-account",
     "allow-remove-account",
     "allow-set-panel",
+    "allow-focus-self",
     "allow-list-hosts",
     "allow-host-send",
     "allow-hosts-path",

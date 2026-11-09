@@ -1,7 +1,15 @@
 {
   "identifier": "claude-web",
-  "description": "claude.ai pages may only forward notifications. Nothing else is exposed to remote content.",
+  "description": "claude.ai pages may only forward notifications, take keyboard focus, and have videos the build can't play converted. Nothing else is exposed to remote content.",
   "webviews": ["acct-*"],
   "remote": { "urls": ["https://claude.ai/*", "https://*.claude.ai/*"] },
-  "permissions": ["allow-web-notify"]
+  "permissions": [
+    "allow-web-notify",
+    "allow-focus-self",
+    "allow-media-upload",
+    "allow-media-convert",
+    "allow-media-status",
+    "allow-media-read",
+    "allow-media-done"
+  ]
 }

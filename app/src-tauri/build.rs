@@ -17,9 +17,12 @@ fn main() {
         "get_autostart",
         "set_autostart",
         "web_notify",
-        "webauthn",
-        "webauthn_cancel",
-        "browser_signin",
+        "focus_self",
+        "media_upload",
+        "media_convert",
+        "media_status",
+        "media_read",
+        "media_done",
     ])))
     .expect("failed to run tauri-build");
 }

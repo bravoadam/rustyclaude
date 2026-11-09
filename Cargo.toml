@@ -5,3 +5,7 @@ members = ["crates/protocol", "crates/daemon", "app/src-tauri"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+
+# Local fixes to the CEF runtime (alpha); see vendor/tauri-runtime-cef/PATCHES.md.
+[patch.crates-io]
+tauri-runtime-cef = { path = "vendor/tauri-runtime-cef" }
